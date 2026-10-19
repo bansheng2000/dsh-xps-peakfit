@@ -25,6 +25,7 @@ XPS 分峰拟合 SOP —— 一个给 AI agent 用的 skill（Agent Skills 目�
 - **步内 mode**：默认「执行」；「诊断」模式只读、只列问题，不改数、不自动转成修改（第二节）。
 - **待确认问题表**：信息缺失项在第八节表化列出，并标注「阻塞 / 可延后」，不在缺信息时替用户假设。
 - **出图分工**：数据与判定归本 skill；要按参考图复刻排版/配色走 `dsh-origin-replica`（本 skill 只交数据、系列与标注、版面约束与禁止项），Origin 工具级细节走 `origin-plotting`。
+- **Origin 收尾显示窗口**（v2.5）：出完最后一张 Origin 图（或交付完成）调 `origin_reveal` / `origin_release` 把 Origin 窗口显示出来并确认 `visible_after` 为真；不这么做，任务结束后只剩一个**看不见的 Origin 后台实例**（COM 拉起默认隐藏），用户既没法直接看/存/关，还挡住下次开 Origin。
 
 ## 交付物（缺一项即未交付）
 
@@ -42,7 +43,7 @@ XPS 分峰拟合 SOP —— 一个给 AI agent 用的 skill（Agent Skills 目�
 | `SKILL.md` | 技能正文（十节）：〇 用途与边界 · 一 铁律 · 二 触发条件与使用方式 · 三 整体输入要求 · 四 整体输出要求 · 五 四个步骤（含五.〇 XPSPeak 4.1 执行映射，及步骤 3 的「基准参数快照」）· 六 产物契约与交付物清单 · 七 项目记录与续接 · 八 待确认问题 · 九 结论字段规范 · 十 禁止事项 |
 | `references/deliverable-templates.md` | `01`–`04` 产物与 `xps_run_record.md` 的可直接填空骨架（字段名不要改，未获取的项写「待确认」，不留空、不猜） |
 
-版本与变更记录写在 `SKILL.md` 顶部（当前 v2.4：出图分工——复刻走 `dsh-origin-replica`、工具细节走 `origin-plotting`；v2.3 起成品图不画残差子图、残差判定仍必须进产物）。
+版本与变更记录写在 `SKILL.md` 顶部（当前 v2.5：新增 Origin 收尾纪律——出完最后一张图把 Origin 窗口显示出来，不留看不见的后台实例；v2.4：出图分工——复刻走 `dsh-origin-replica`、工具细节走 `origin-plotting`；v2.3 起成品图不画残差子图、残差判定仍必须进产物）。
 
 ## 使用
 

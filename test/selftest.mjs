@@ -359,6 +359,11 @@ check('tab 注册带 id/kind 且主类型才有 guide', () => {
   assert.match(clientSrc, /kind: spec\.kind,/);
   assert.match(clientSrc, /\.\.\.\(spec\.guide === null \? \{\} : \{ guide: spec\.guide \}\)/);
 });
+check('「XPS 模板」在「+」菜单里排在 Origin 模板（order 45）之上：order = 44', () => {
+  const m = /guide: \[\{ order: (\d+), title: \(\) => TAB_TITLE \}\]/.exec(clientSrc);
+  assert.ok(m !== null, '找不到主类型 guide 的 order 声明');
+  assert.equal(Number(m[1]), 44, 'order 必须是 44（45 = Origin 模板，44 紧贴其上方）');
+});
 check('「用这个」在教学档被前端禁用', () => {
   assert.match(clientSrc, /disabled: isTeach/);
   assert.match(clientSrc, /教学模式下不代执行/);

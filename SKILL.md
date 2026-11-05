@@ -234,6 +234,8 @@ whenToUse: 用户给出 XPS 数据（全谱和/或高分辨谱），要求做荷
    | `charge_correction_ev`、`reference_peak` | **不传参**，只写进报告（「已按 C 1s 284.6 eV 校正」这类信息） |
    | `provenance`、`peak_windows[].observed` | **不传参**，只用于显示与换样品对照（`observed` 是这一次的实测值：峰位/宽/%GL/面积/占比） |
 
+   **`warnings` 是提醒不是错误**：模板没写 `eta` 时 `use` 仍返回 200，但 `instruction.warnings` 非空（「已按 0.3 拟合，实测 %GL 不同的谱请补 eta」）——见到就补 `eta` 再拟合，别装作没看见。
+
    **不映射面积、不映射峰高**：模板里没有这两个字段，别自己造经验值；`observed.area` / `observed.share_pct` 也只是参照，**不得**变成 `ratio` 或任何固定约束。
 4. **`search_ev` 是窗口半宽 → `ctol`**：用来判「拟合峰跑出窗口 → 报错停下」，不是用来固定峰位；模板只存一个标量，取各峰最大值（`xpspeak_fit` 不收数组）。峰位在 `centers` 里只是初值，第 3 步的初值可复现性照常做。
 5. **教学档**：模板页按钮禁用，服务端对 `use` 返回 403 `teaching-mode`。此时改走手工四步、把模板字段念给用户听；不许悄悄切档，也不许换通道绕过。

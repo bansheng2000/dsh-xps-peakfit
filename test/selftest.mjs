@@ -328,6 +328,15 @@ check('③ 老模板（无 eta / 无 search_ev）→ ctol 1.0、eta 0.3，use �
   assert.equal(fit.arguments.eta, 0.3, 'eta 回落到默认 0.3');
 });
 
+check('⑦ 缺 eta 的模板 use 带非空 warnings；写了 eta 的不给警告', () => {
+  const noEta = { ...GOOD, peak_windows: [{ label: 'Mo 3d5/2', center_ev: 229.0 }] };
+  const r1 = useInstruction(noEta, 'exec');
+  assert.equal(r1.ok, true, '缺 eta 不是错误，不能拦');
+  assert.ok(Array.isArray(r1.instruction.warnings) && r1.instruction.warnings.length > 0, '缺 eta 必须给非空 warnings');
+  const r2 = useInstruction({ ...GOOD, eta: 0.45 }, 'exec');
+  assert.ok(Array.isArray(r2.instruction.warnings) && r2.instruction.warnings.length === 0, '写了 eta 就不该有 warnings');
+});
+
 check('④ observed 只作对照，绝不进 fit 参数（面积比不固定是用户决定）', () => {
   const t = {
     ...GOOD,

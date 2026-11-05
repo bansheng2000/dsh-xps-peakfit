@@ -87,7 +87,7 @@ XPS 分峰拟合 SOP —— 一个给 AI agent 用的 skill（Agent Skills 目�
 
 - **三个 py 的唯一源是本仓库 `server/`**（`xpspeak_mcp.py` / `xpspeak_drive.py` / `xps_fit.py`）。安装位 `~/.dsh/dsh-xps-peakfit/server/` 由插件壳按 sha256 用包内副本覆盖，**不要手改安装位**。
 - **`legacy/dsh-xpspeak/` 是旧仓库的只读存档**（含 `.git` 与全部历史，外层 `.gitignore` 已忽略）：不要再改里面任何文件，包括其中的 py 副本与 `skills/`。
-- 技能副本同步与核对：`py sync_skills.py`（写入 `~/.agents/skills/`）、`py sync_skills.py --check`（只核对，`OK/DIFF/MISSING/EXTRA` 四态）。
+- 技能副本同步与核对：`py sync_skills.py`（写入 `~/.agents/skills/`）、`py sync_skills.py --check`（只核对，`OK/DIFF/MISSING/EXTRA` 四态）。**两个技能共 7 个文件一起管**（主技能 3 + 自动化技能 SKILL.md 与三个 py），干净态 `OK=7`；安装位不归它管，别用同步脚本碰 `~/.dsh/dsh-xps-peakfit/server/`。
 
 ## 边界（本 skill 不做什么）
 

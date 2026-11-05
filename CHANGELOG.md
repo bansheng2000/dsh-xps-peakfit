@@ -17,6 +17,7 @@
 
 - **并入 XPS 全线（仓库结构）**：`skills/xpspeak-automation/`（软件自动化技能：`SKILL.md` + 三个 py 的技能内副本）搬入本仓库；旧仓库 `dsh-xpspeak` 整仓（含 `.git` 与历史）迁到 `legacy/dsh-xpspeak/` 只读留存，外层 `.gitignore` 加 `legacy/`，嵌套仓库不被外层跟踪。
 - **脚本路径**：`check_skills.py` 的 `BASE` 换成脚本所在目录（本仓库内自定位），两个 SKILL 路径改指仓库根 `SKILL.md` 与 `skills/xpspeak-automation/SKILL.md`；`sync_skills.py` 源本来就在本仓库，未改。
+- **同步脚本扩到两个技能**：`sync_skills.py` 从 3 个文件扩到 7 个（主技能 `SKILL.md` + `references/`，加 `skills/xpspeak-automation/` 的 `SKILL.md` 与三个 py），干净态 `OK=7`；EXTRA 四态保留（副本里多出来的文件照样报红），安装位 `~/.dsh/dsh-xps-peakfit/server/` 明确不归它管。
 - **唯一源**：三个 py 以 `server/` 为准，安装位 `~/.dsh/dsh-xps-peakfit/server/` 由插件壳按 sha256 覆盖；`legacy/` 内任何文件（包括其中的 py 与 `skills/`）不再修改。
 
 ## 未发版修订（并入 `dsh-xpspeak` 插件前的技能侧准备）

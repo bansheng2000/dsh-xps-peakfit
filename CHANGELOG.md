@@ -15,6 +15,10 @@
 - **回环校验**：`/xps/*` 全部要求 Host 与 peer 双回环，否则 403（插件路由不在宿主鉴权墙后面）。
 - **自检**：`test/selftest.mjs`（46 项，纯 node 无依赖，只碰临时目录），`node test/selftest.mjs` → `selftest OK: 46 项全过`。
 
+- **修 search_ev 死字段**：`lib/routes.js` 的 `useInstruction` 原来只有 `centers/ds/ratio/wlo/whi/bg`，`search_ev` 上传时校验、进模板、进 notes，却从没传给拟合（实际一直走 `xpspeak_fit` 默认 `ctol=1.0`）。现取各峰 `search_ev` 最大值折成标量 `ctol`，无 `search_ev` 回落 1.0，`fields` 同步带出，notes 写清「只存一个标量」。
+- **模板 schema v2（全部可选，老模板照样能用）**：`eta`（0–1，→ `xpspeak_fit.eta`）、`charge_correction_ev`（−20–20，显示）、`reference_peak`（≤40 字）、`provenance`（`source_file`/`points`/`step_ev`/`range_ev`，纯显示）、`peak_windows[].observed`（`center_ev`/`fwhm_ev`/`gl_pct`/`area`/`share_pct`，只作对照，**绝不传给 fit**）。`eta` 是本次最关键一条：三份实测谱主峰 %GL 45–48%、卫星 100%，此前固定 0.3 与实测差一截。
+- **模板页 UI**：卡片 meta 补 `GL 45%` 与 `校正 +1.2 eV`；点卡片名开详情表（项目 / 模板值 / 实测值三列：峰位、搜索窗口、FWHM 区间、等宽、背景、Δ、%GL、面积占比、校正基准、来源）。
+- **自检 +6 条**：`search_ev`→`ctol`、`eta`→`xpspeak_fit.eta`、老模板回落（1.0 / 0.3）、`observed` 不进 fit 参数、详情表两列、schema v2 非法值整条拒绝。①②③⑤⑥ 五条在旧代码上跑红；④ 在旧码上本已通过（`observed` 随 `peak_windows` 透传），防的是将来泄漏。
 - **「用这个」的步骤改成真能执行的链**：原实现逐个 `xpspeak_menu {top:"Add Peak"}`（菜单通道不接收位置/宽度，只会建空峰壳）→ 改为 `xpspeak_status` → `xpspeak_open` → `xpspeak_fit`（`centers`/`ds`/`ratio`/`wlo`/`whi`/`bg`）→ `xpspeak_export` → `xpspeak_save`，并新增 `notes` 说明「Add Peak 不接收参数、要手工加壳请在软件里点」与 `search_ev` 是窗口半宽；`tougaard` 背景映射为 `bg=file`。返回键名 `{ok, instruction:{template,name,fields,steps,notes}}` 未改。
 - **兼容别名 id/kind 统一**：`COMPAT_ID = COMPAT_KIND = "xps-templates"`（原 `xps/compat` 与 kind 不同字符串，违反「id = kind = 槽位 key」），`guide` 仍为 `null`；主类型 `"xps"` 未动。
 - **说明书补模板页一节**：`SKILL.md` 在第 3 步之前新增「模板页与「用这个」的返回值」（无编号标题），写死字段→工具参数映射与「不映射面积/峰高」、`search_ev` 语义、教学档 403、模板不是数据来源。

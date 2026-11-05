@@ -296,6 +296,100 @@ await new Promise((resolve) => httpServer.close(resolve));
 
 /* ───────── 6. server/*.py 同步两分支 ───────── */
 
+/* ── schema v2：ctol / eta / 老模板回落 / observed 只作参照 / 详情表 ── */
+
+check('① search_ev → xpspeak_fit.ctol（取各峰最大值，模板只存一个标量）', () => {
+  const t = {
+    ...GOOD,
+    peak_windows: [
+      { label: 'Mo 3d5/2', center_ev: 229.0, search_ev: 0.6 },
+      { label: 'Mo 3d3/2', center_ev: 232.1, search_ev: 0.4 },
+    ],
+  };
+  const ins = useInstruction(t, 'exec').instruction;
+  const fit = ins.steps.find((s) => s.tool === 'xpspeak_fit');
+  assert.equal(fit.arguments.ctol, 0.6, 'ctol 必须取各峰 search_ev 的最大值（0.6）');
+  assert.equal(ins.fields.ctol, 0.6, 'fields 也要带 ctol，人看到的和实际传的必须一致');
+});
+
+check('② eta → xpspeak_fit.eta（实测 %GL 45–48%，不许固定 0.3）', () => {
+  const ins = useInstruction({ ...GOOD, eta: 0.45 }, 'exec').instruction;
+  const fit = ins.steps.find((s) => s.tool === 'xpspeak_fit');
+  assert.equal(fit.arguments.eta, 0.45);
+  assert.equal(ins.fields.eta, 0.45);
+});
+
+check('③ 老模板（无 eta / 无 search_ev）→ ctol 1.0、eta 0.3，use 仍 ok', () => {
+  const legacy = { ...GOOD, peak_windows: [{ label: 'Mo 3d5/2', center_ev: 229.0 }] };
+  const r = useInstruction(legacy, 'exec');
+  assert.equal(r.ok, true, '缺新字段不能把老模板挡在门外');
+  const fit = r.instruction.steps.find((s) => s.tool === 'xpspeak_fit');
+  assert.equal(fit.arguments.ctol, 1.0, 'ctol 回落到 xpspeak_fit 默认值 1.0');
+  assert.equal(fit.arguments.eta, 0.3, 'eta 回落到默认 0.3');
+});
+
+check('④ observed 只作对照，绝不进 fit 参数（面积比不固定是用户决定）', () => {
+  const t = {
+    ...GOOD,
+    peak_windows: [
+      {
+        label: 'Mo 3d5/2',
+        center_ev: 229.0,
+        search_ev: 0.5,
+        observed: { center_ev: 229.12, fwhm_ev: 0.92, gl_pct: 46, area: 12000, share_pct: 62 },
+      },
+    ],
+  };
+  const ins = useInstruction(t, 'exec').instruction;
+  const fit = ins.steps.find((s) => s.tool === 'xpspeak_fit');
+  const keys = Object.keys(fit.arguments);
+  for (const k of ['observed', 'area', 'share_pct', 'fwhm_ev', 'gl_pct']) {
+    assert.ok(!keys.includes(k), `fit 参数里不能出现 ${k}（只做参照）`);
+  }
+  assert.equal(ins.fields.peak_windows[0].observed.share_pct, 62, 'observed 必须原样带进 fields 供对照');
+});
+
+check('⑤ 详情表：卡片能开详情，含 GL 与「模板值 vs 实测值」两列', () => {
+  const src = readFileSync(join(REPO, 'lib', 'client.js'), 'utf8');
+  assert.match(src, /模板值[\s\S]{0,40}实测值/, '详情表必须有模板值/实测值两列');
+  assert.match(src, /`GL \$\{/, 'meta 行要显示 GL 百分比');
+  assert.match(src, /openDetail/, '卡片要能打开详情');
+});
+
+check('⑥ schema v2 非法值整条拒绝（eta/charge/provenance/observed 范围）', () => {
+  const bad = [
+    { ...GOOD, eta: 1.5 },
+    { ...GOOD, eta: -0.1 },
+    { ...GOOD, charge_correction_ev: 30 },
+    { ...GOOD, provenance: { source_file: 'a.dat', points: 0, step_ev: 0.1, range_ev: 20 } },
+    { ...GOOD, provenance: { source_file: 'a.dat', points: 100, step_ev: -1, range_ev: 20 } },
+    {
+      ...GOOD,
+      peak_windows: [{ label: 'Mo 3d5/2', center_ev: 229, search_ev: 0.5, observed: { share_pct: 120 } }],
+    },
+  ];
+  for (const t of bad) assert.equal(validateTemplate(t).ok, false, JSON.stringify(t));
+  assert.equal(
+    validateTemplate({
+      ...GOOD,
+      eta: 0.45,
+      charge_correction_ev: -1.2,
+      reference_peak: 'C 1s 284.6 eV',
+      provenance: { source_file: 'a.dat', points: 700, step_ev: 0.1, range_ev: 60 },
+      peak_windows: [
+        {
+          label: 'Mo 3d5/2',
+          center_ev: 229,
+          search_ev: 0.5,
+          observed: { center_ev: 229.1, fwhm_ev: 0.9, gl_pct: 46, area: 12000, share_pct: 62 },
+        },
+      ],
+    }).ok,
+    true,
+    '合法的新字段不能被误杀',
+  );
+});
+
 process.stdout.write('\n[6] 包内 ↔ 安装位 sha256\n');
 const from = join(tmp, 'pkg');
 const to = join(tmp, 'inst');

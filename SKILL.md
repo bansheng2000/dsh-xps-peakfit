@@ -229,9 +229,13 @@ whenToUse: 用户给出 XPS 数据（全谱和/或高分辨谱），要求做荷
    | `constraints.area_ratio` | `xpspeak_fit.ratio` |
    | `fwhm_min` / `fwhm_max` | `xpspeak_fit.wlo` / `whi` |
    | `background` | `xpspeak_fit.bg`：`shirley`→`shirley`、`linear`→`linear`、`tougaard`→`file`（fit 没有 tougaard 项，退回谱图自带背景，并在产物里写明） |
+   | `eta`（0–1，%Lorentzian） | `xpspeak_fit.eta`（缺省 0.3 只是老模板回落值；三份实测谱主峰 %GL 45–48%、卫星 100%，能填就填） |
+   | `peak_windows[].search_ev` | `xpspeak_fit.ctol`（峰位初值允许移动的半宽）**只能给一个标量**：取各峰 `search_ev` 的最大值；一个都没有 → 回落 1.0 eV |
+   | `charge_correction_ev`、`reference_peak` | **不传参**，只写进报告（「已按 C 1s 284.6 eV 校正」这类信息） |
+   | `provenance`、`peak_windows[].observed` | **不传参**，只用于显示与换样品对照（`observed` 是这一次的实测值：峰位/宽/%GL/面积/占比） |
 
-   **不映射面积、不映射峰高**：模板里没有这两个字段，别自己造经验值。
-4. **`peak_windows[].search_ev` 是窗口半宽**：用来判「拟合峰跑出窗口 → 报错停下」，不是用来固定峰位；峰位在 `centers` 里只是初值，第 3 步的初值可复现性照常做。
+   **不映射面积、不映射峰高**：模板里没有这两个字段，别自己造经验值；`observed.area` / `observed.share_pct` 也只是参照，**不得**变成 `ratio` 或任何固定约束。
+4. **`search_ev` 是窗口半宽 → `ctol`**：用来判「拟合峰跑出窗口 → 报错停下」，不是用来固定峰位；模板只存一个标量，取各峰最大值（`xpspeak_fit` 不收数组）。峰位在 `centers` 里只是初值，第 3 步的初值可复现性照常做。
 5. **教学档**：模板页按钮禁用，服务端对 `use` 返回 403 `teaching-mode`。此时改走手工四步、把模板字段念给用户听；不许悄悄切档，也不许换通道绕过。
 6. **模板峰位来自文献或用户，不是数据来源**：拟合仍走第 3 步的门槛、残差判定与结论字段；模板再漂亮也不能替数据说话（对齐铁律第一条）。
 

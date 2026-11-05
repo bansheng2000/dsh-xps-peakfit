@@ -66,9 +66,9 @@ XPS 分峰拟合 SOP —— 一个给 AI agent 用的 skill（Agent Skills 目�
 
 侧栏标签：`id = kind = 槽位 key = "xps"`（三者必须同一字符串），显示名「XPS 模板」，另注册一个不带 `guide` 的兼容别名 `xps-templates`。
 
-模板是一个 JSON（`name` / `category` / `element` / `orbital` / `doublet_delta_ev` / `peak_windows[]` / `fwhm_min` / `fwhm_max` / `background` / `constraints` / `note`），**不预置任何模板**：峰位差 1 eV 结论就错，宁可不给。缩略图由 `lib/routes.js:pseudoVoigt` 按模板参数算一条模拟谱拼成 SVG（公式与 `server/xps_fit.py:gl` 一致，自检里对拍），算不出来给「无参数」占位。
+模板是一个 JSON（`name` / `category` / `element` / `orbital` / `doublet_delta_ev` / `peak_windows[]` / `fwhm_min` / `fwhm_max` / `background` / `constraints` / `note`；schema v2 起可选 `eta` / `charge_correction_ev` / `reference_peak` / `provenance` / `peak_windows[].observed`，缺省仍按老模板走），**不预置任何模板**：峰位差 1 eV 结论就错，宁可不给。缩略图由 `lib/routes.js:pseudoVoigt` 按模板参数算一条模拟谱拼成 SVG（公式与 `server/xps_fit.py:gl` 一致，自检里对拍），算不出来给「无参数」占位。
 
-**「用这个」只产出结构化指令**（模板字段 + 建议调用顺序 + `notes`），交 agent 执行；参数一律落在 `xpspeak_fit`（`centers`/`ds`/`ratio`/`wlo`/`whi`/`bg`），**Add Peak 是菜单命令、不接收位置与宽度参数**，别指望它带参数建峰；服务端**从不**调 MCP、不驱动 XPSPeak。教学模式（`~/.dsh/dsh-xps-peakfit/mode.json`，与 MCP 同一份真源）下按钮禁用，且服务端同样返回 403 —— 前端禁用只是体验，闸门在服务端。
+**「用这个」只产出结构化指令**（模板字段 + 建议调用顺序 + `notes`），交 agent 执行；参数一律落在 `xpspeak_fit`（`centers`/`ds`/`ratio`/`wlo`/`whi`/`bg`/`eta`/`ctol`；`ctol` 取各峰 `search_ev` 最大值），**Add Peak 是菜单命令、不接收位置与宽度参数**，别指望它带参数建峰；服务端**从不**调 MCP、不驱动 XPSPeak。教学模式（`~/.dsh/dsh-xps-peakfit/mode.json`，与 MCP 同一份真源）下按钮禁用，且服务端同样返回 403 —— 前端禁用只是体验，闸门在服务端。
 
 数据目录：`~/.dsh/dsh-xps-peakfit/`（`templates/<id>/meta.json`、`favorites.json`、`mode.json`、`server/`）。pnpm 重装 node_modules 不会清这里。
 

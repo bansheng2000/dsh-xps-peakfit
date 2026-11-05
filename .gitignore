@@ -1,3 +1,4 @@
 .dsh-ops/
 __pycache__/
 *.pyc
+legacy/

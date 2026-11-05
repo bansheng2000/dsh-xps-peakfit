@@ -42,11 +42,17 @@ XPS 分峰拟合 SOP —— 一个给 AI agent 用的 skill（Agent Skills 目�
 |---|---|
 | `SKILL.md` | 技能正文（十一节）：〇 用途与边界 · 一 铁律 · 二 触发条件与使用方式 · 三 整体输入要求 · 四 整体输出要求 · 五 四个步骤（含附录 A XPSPeak 4.1 执行映射、附录 B 分轮放开与检查点，及步骤 3 的「基准参数快照」）· 六 产物契约与交付物清单 · 七 项目记录与续接 · 八 待确认问题 · 九 结论字段规范 · 十 禁止事项 · 十一 科学边界 |
 | `references/deliverable-templates.md` | `01`–`04` 产物与 `xps_run_record.md` 的可直接填空骨架（字段名不要改，未获取的项写「待确认」，不留空、不猜） |
+| `references/peakfit-baseline-snapshot.md` | 基准参数快照：仅当沿用那张参考截图时适用，不作为通用默认值 |
 | `package.json` / `cordis.patch.yml` | 插件包声明（`files` 必须列全运行期文件）与 bundle patch（`- insert:` 形态） |
 | `lib/index.js` | 插件入口：`server/*.py` sha256 同步 + 挂 `/xps` 路由 |
 | `lib/routes.js` | 模板存取、SVG 缩略图、「用这个」指令、回环校验、档位读取 |
 | `lib/client.js` | 右侧栏「XPS 模板」标签（免构建，宿主 ModuleLoader 注入） |
-| `server/*.py` | XPSPeak 驱动的三个 py 副本（与安装位同源，包内为准） |
+| `server/*.py` | XPSPeak 驱动的三个 py —— **唯一源**（安装位由壳按 sha256 用包内副本覆盖，不手改安装位） |
+| `skills/xpspeak-automation/` | 第二个技能（软件自动化）：`SKILL.md` + 三个 py 的技能内副本（单独安装用，本仓库仍以 `server/` 为准） |
+| `check_skills.py` | 触发词去重与双向互指核对（C1–C4）：`py check_skills.py` |
+| `sync_skills.py` | 技能副本同步与漂移核对：`py sync_skills.py --check` |
+| `legacy/dsh-xpspeak/` | 旧仓库整仓只读存档（含 `.git` 与历史，被 `.gitignore` 忽略） |
+| `docs/v2.4-figure-routing.md` | 2026-10-19「分峰不等同于复刻」的决策记录（纯档案，无文件引用） |
 | `test/selftest.mjs` | 自检：模板 CRUD / 路由状态码 / 拒绝路径 / sha256 两分支 / tab 契约 / 无 MCP 调用（`node test/selftest.mjs`） |
 
 版本号与完整变更见 `CHANGELOG.md`（当前 v2.8.0 未发版）。本 README 不再内联变更摘要，版本只维护 `CHANGELOG.md` 一处。
@@ -68,9 +74,20 @@ XPS 分峰拟合 SOP —— 一个给 AI agent 用的 skill（Agent Skills 目�
 
 ## 使用
 
-把本仓库目录放进 agent 的技能目录即可（例如 DSH 的 `~/.agents/skills/dsh-xps-peakfit/`）。
+两个技能都在本仓库，装进 agent 的技能目录（如 `~/.agents/skills/`）后各自可独立触发：
 
-触发词：XPS 分峰 / XPS 拟合 / XPS peak fitting / XPSPeak / XPSPEAK41 / 荷电校正 / charge correction / 高分辨谱 / C 1s 校正 / 峰位移。
+| 技能 | 位置 | 管什么 |
+|---|---|---|
+| `dsh-xps-peakfit` | 仓库根 `SKILL.md` + `references/` | 判据、门槛、产物契约、四步 SOP |
+| `xpspeak-automation` | `skills/xpspeak-automation/` | 只驱动 XPSPeak 4.1（Win32 消息级）+ 自带 MCP server |
+
+触发词刻意不重叠：`XPSPeak` / `XPSPEAK41` 归自动化技能，`XPS 分峰` / `XPS 拟合` / `XPS peak fitting` / 荷电校正 / charge correction / 高分辨谱 / C 1s 校正 / 峰位移 归主技能。两边各有一行互指（要判据与门槛 → 主技能；要操作软件 → 自动化技能），`py check_skills.py` 就是核对这件事（C1 触发词精确相等即失败，C3 互指缺失即失败）。
+
+## 唯一源与 legacy 存档
+
+- **三个 py 的唯一源是本仓库 `server/`**（`xpspeak_mcp.py` / `xpspeak_drive.py` / `xps_fit.py`）。安装位 `~/.dsh/dsh-xps-peakfit/server/` 由插件壳按 sha256 用包内副本覆盖，**不要手改安装位**。
+- **`legacy/dsh-xpspeak/` 是旧仓库的只读存档**（含 `.git` 与全部历史，外层 `.gitignore` 已忽略）：不要再改里面任何文件，包括其中的 py 副本与 `skills/`。
+- 技能副本同步与核对：`py sync_skills.py`（写入 `~/.agents/skills/`）、`py sync_skills.py --check`（只核对，`OK/DIFF/MISSING/EXTRA` 四态）。
 
 ## 边界（本 skill 不做什么）
 

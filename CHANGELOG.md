@@ -15,6 +15,10 @@
 - **回环校验**：`/xps/*` 全部要求 Host 与 peer 双回环，否则 403（插件路由不在宿主鉴权墙后面）。
 - **自检**：`test/selftest.mjs`（46 项，纯 node 无依赖，只碰临时目录），`node test/selftest.mjs` → `selftest OK: 46 项全过`。
 
+- **并入 XPS 全线（仓库结构）**：`skills/xpspeak-automation/`（软件自动化技能：`SKILL.md` + 三个 py 的技能内副本）搬入本仓库；旧仓库 `dsh-xpspeak` 整仓（含 `.git` 与历史）迁到 `legacy/dsh-xpspeak/` 只读留存，外层 `.gitignore` 加 `legacy/`，嵌套仓库不被外层跟踪。
+- **脚本路径**：`check_skills.py` 的 `BASE` 换成脚本所在目录（本仓库内自定位），两个 SKILL 路径改指仓库根 `SKILL.md` 与 `skills/xpspeak-automation/SKILL.md`；`sync_skills.py` 源本来就在本仓库，未改。
+- **唯一源**：三个 py 以 `server/` 为准，安装位 `~/.dsh/dsh-xps-peakfit/server/` 由插件壳按 sha256 覆盖；`legacy/` 内任何文件（包括其中的 py 与 `skills/`）不再修改。
+
 ## 未发版修订（并入 `dsh-xpspeak` 插件前的技能侧准备）
 
 本轮只做「两技能 → 一插件」的准备工作，**判据与算法内容一字未改**；版本号仍为 v2.7.2，待建包轮统一递增。

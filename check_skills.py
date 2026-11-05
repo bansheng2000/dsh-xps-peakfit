@@ -18,7 +18,8 @@
 C1 只判「精确相等」而不判子串：自动化侧词条天然含 `XPSPeak`（如「教我 XPSPeak」），
 按子串判会永远 red，人最后会把检查关掉——检查被关掉就等于没有。
 
-合并进 dsh-xpspeak 插件后，只需改下面的 SKILLS 表（路径 + 技能名 + 对方技能名）。
+两个技能现在同在本仓库：`SKILL.md`（四步 SOP）与 `skills/xpspeak-automation/SKILL.md`（软件自动化）。
+新增第三个技能时，在下面的 SKILLS 表里加一行即可（路径 + 技能名 + 对方技能名）。
 """
 from __future__ import annotations
 
@@ -31,12 +32,12 @@ try:  # Windows 控制台默认 GBK，会把中文与符号打成乱码/直接�
 except Exception:
     pass
 
-BASE = r"E:\文档\deepseek-harness"
+REPO = os.path.dirname(os.path.abspath(__file__))
 SKILLS = [
     {"name": "dsh-xps-peakfit", "other": "xpspeak-automation",
-     "path": os.path.join(BASE, "dsh-xps-peakfit", "SKILL.md")},
+     "path": os.path.join(REPO, "SKILL.md")},
     {"name": "xpspeak-automation", "other": "dsh-xps-peakfit",
-     "path": os.path.join(BASE, "dsh-xpspeak", "skills", "xpspeak-automation", "SKILL.md")},
+     "path": os.path.join(REPO, "skills", "xpspeak-automation", "SKILL.md")},
 ]
 KEY = "触发词："
 MIN_TRIGGERS = 3

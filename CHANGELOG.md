@@ -2,6 +2,19 @@
 
 `SKILL.md` 正文只保留当前版本号与一行说明；完整历史记在这里（正文顶部原来那条约 1,800 字符的变更行已搬到此文件，避免每次触发都把它载入上下文）。
 
+## v2.8.0（未发版）：插件壳 + 模板页
+
+本轮把仓库变成 DSH 插件包，**判据、算法与四步流程一字未改**。版本号写 `package.json`（`2.8.0`：不低于旧线 1.2.2 / 2.7.2，也不暗示算法变化），`SKILL.md` 正文未动。
+
+- **包与壳**：`package.json`（`main: lib/index.js`、`type: module`、`exports["./client"]`、`dsh.bundle.patch`、`dsh.client.inject = ["slots","sidebarRightTabs","sidebarRight"]`）；`files` 列全 `lib/**/*.js` / `cordis.patch.yml` / `server/*.py` / `skills/**` / `README.md` / `test/selftest.mjs`（漏一个就是装完 `ERR_MODULE_NOT_FOUND`，自检里有一条专门核）。`cordis.patch.yml` 用 `- insert:` 形态（裸 list 只会改已有条目，条目不存在是静默空操作），条目 id `xps-peakfit`。
+- **三个 py 随包 + 启动同步**：`server/` 放 `xpspeak_mcp.py` / `xpspeak_drive.py` / `xps_fit.py`；`lib/index.js:syncServerFiles()` 与安装位 `~/.dsh/dsh-xps-peakfit/server/` 比 sha256，不一致**以包内为准**覆盖并写一行日志（`旧 → 新`）；包内缺文件时保留安装位不动并如实记 `missing-in-package`。**禁止反向覆盖**。
+- **模板页**（`/xps` 路由 + 右侧栏「XPS 模板」标签）：分类 chips → 搜索 → 卡片 → 悬停放大（原生 `div` + `position:fixed`，150 ms 延迟，四周夹 8 px）→ 上传（只收 `.json`、≤256 KB、服务端生成 id）→ 改名（id 不动）→ 收藏 → 删除（同时从收藏剔掉）。**不预置任何模板**。
+- **缩略图**：`lib/routes.js:pseudoVoigt` 按模板参数算一条模拟谱拼 SVG（纯标准库，不碰 matplotlib / Origin / MCP），与 `server/xps_fit.py:gl` 同一公式，自检里用 python 对拍；无参数给「无参数」占位，不编谱。
+- **「用这个」只产出结构化指令**（模板字段 + 建议调用顺序），交 agent 执行。服务端**从不**调 MCP、不驱动 XPSPeak（自检断言 `lib/*.js` 无 `child_process` / 连接器 API / 工具调用）。
+- **档位真源统一**：模板页与 MCP 读同一份 `~/.dsh/dsh-xps-peakfit/mode.json`，语义与 `xpspeak_mcp.py:load_mode()` 一致（缺文件 → env → exec；坏文件 → teach 并写明原因）。教学档下「用这个」按钮禁用，**服务端同样 403**。
+- **回环校验**：`/xps/*` 全部要求 Host 与 peer 双回环，否则 403（插件路由不在宿主鉴权墙后面）。
+- **自检**：`test/selftest.mjs`（46 项，纯 node 无依赖，只碰临时目录），`node test/selftest.mjs` → `selftest OK: 46 项全过`。
+
 ## 未发版修订（并入 `dsh-xpspeak` 插件前的技能侧准备）
 
 本轮只做「两技能 → 一插件」的准备工作，**判据与算法内容一字未改**；版本号仍为 v2.7.2，待建包轮统一递增。

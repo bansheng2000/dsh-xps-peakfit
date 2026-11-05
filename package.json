@@ -1,0 +1,52 @@
+{
+  "name": "dsh-xps-peakfit",
+  "version": "2.8.0",
+  "description": "XPS 分峰拟合（skill + 插件壳）：壳把 XPSPeak 驱动的三个 py 同步到安装位、挂右侧栏「XPS 模板」页；模板只产出调用指令，执行与档位闸门在 MCP。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json",
+    "./client": "./lib/client.js"
+  },
+  "files": [
+    "lib/**/*.js",
+    "cordis.patch.yml",
+    "server/*.py",
+    "skills/**",
+    "README.md",
+    "test/selftest.mjs"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "xps",
+    "peakfit",
+    "xpspeak"
+  ],
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "cordis.patch.yml"
+    },
+    "engines": {
+      "dsh": ">=0.1.7-rc.1"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "slots",
+        "sidebarRightTabs",
+        "sidebarRight"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node test/selftest.mjs"
+  }
+}

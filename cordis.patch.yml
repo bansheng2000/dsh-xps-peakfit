@@ -1,0 +1,15 @@
+# dsh-xps-peakfit — 插件壳 bundle patch
+#
+# 只注册一个条目 `xps-peakfit`（name 必须等于包名，市场才认为它 live）。
+# 壳的职责只有两件：
+#   · 把包内 server/*.py 与安装位 ~/.dsh/dsh-xps-peakfit/server/ 比 sha256，不一致以包内为准覆盖并写日志
+#   · 挂模板页路由 /xps（回环校验在 lib/routes.js:isLoopbackRequest）
+# 它不调 MCP、不驱动 XPSPeak、不装连接器。
+#
+# 为什么必须用 `- insert:` 包裹：bundle patch 里顶层扁平的 `- id:` 只会被 loader
+# 当成「改已有条目配置」，条目不存在时是**静默空操作**——插件永远挂不上
+# （plugin_manager list_bundles 会把它列进 overrides 而不是 rows）。
+# 注意：条目 id `xps-peakfit` 与侧栏的槽位 key `xps` 是两个不同的东西，别统一。
+- insert:
+    - id: xps-peakfit
+      name: dsh-xps-peakfit

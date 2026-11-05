@@ -328,6 +328,19 @@ def do_save(path, what="xps"):
     return "已保存 %s（%d 字节，文件头 %r）" % (path, os.path.getsize(path), head)
 
 
+def _parse_eta(v, nc=None):
+    """eta 支持 number / 逗号串 / 数组；逐峰时个数必须等于峰数。"""
+    if isinstance(v, str):
+        parts = [x.strip() for x in v.replace(",", " ").split() if x.strip()]
+        v = [float(x) for x in parts] if len(parts) > 1 else float(parts[0])
+    if isinstance(v, (list, tuple)):
+        out = [float(x) for x in v]
+        if nc is not None and len(out) != nc:
+            raise ValueError("eta 序列长度 %d != 峰数 %d" % (len(out), nc))
+        return out
+    return float(v)
+
+
 def do_fit(a):
     """一次调用完成「拟合 -> 参数±σ -> 优度 -> 可选曲线 CSV」，不启动 GUI。
 
@@ -339,9 +352,11 @@ def do_fit(a):
         if len(win) != 2:
             raise ValueError("window 必须是 [lo, hi] 两个值（eV），收到 %r" % (win,))
         lo, hi = float(win[0]), float(win[1])
-    res = F.run(a["path"], [float(c) for c in a["centers"]], a.get("bg", "file"),
+    centers = [float(c) for c in a["centers"]]
+    eta = _parse_eta(a.get("eta", 0.3), len(centers))
+    res = F.run(a["path"], centers, a.get("bg", "file"),
                 int(a.get("bg_col", 4)), float(a.get("ds", 1.18)),
-                float(a.get("ratio", 0.5)), float(a.get("eta", 0.3)),
+                float(a.get("ratio", 0.5)), eta,
                 a.get("csv"), int(a.get("scan", 0)),
                 float(a.get("ctol", 1.0)), float(a.get("wlo", 0.6)),
                 float(a.get("whi", 4.0)), float(a.get("hmax", 120000.0)),
@@ -350,6 +365,13 @@ def do_fit(a):
     pre = [t for t in (F.bound_text(res), "\n".join(res.get("warnings") or [])) if t]
     if pre:                         # 撞界 / 约束不匹配都置顶，别埋进正文让模型漏读
         txt = "\n".join(pre) + "\n" + txt
+    pf = F.preflight(res, E=res["curves"]["E"], bg_used=a.get("bg", "file"),
+                     expect_bg=a.get("expect_bg"))
+    res["preflight"] = pf
+    if pf["errors"]:
+        txt = F.preflight_text(pf) + "\n⛔ 已阻断保存：不要调用 xpspeak_build / xpspeak_save。\n" + txt
+    elif pf["warnings"]:
+        txt = F.preflight_text(pf) + "\n" + txt
     for k in sorted(k for k in res if k.startswith("scan")):
         s = res[k]
         txt += "\n  对照 %s 条双线: rms=%.1f  AIC=%.1f  R²=%.6f%s" % (
@@ -411,6 +433,49 @@ def _spec_areas(path):
     return out, note
 
 
+def build_guard(peaks, expect_bg=None, actual_bg=None, wlo=None, whi=None):
+    """保存前的硬前置（纯函数，便于单测）：不满足就抛 ValueError，调用方据此**不落盘**。
+
+    两条：
+      1. 背景不一致：`background` 字段只影响拟合，不改变保存文件里的背景，两者对不上时
+         结论与图不是同一件事（tougaard 不在 xps_fit 支持内，按 file 处理并允许）。
+      2. 撞界：峰 FWHM 正好顶在 wlo/whi 上时，这个值是约束决定的、不是拟合出来的。
+    """
+    if expect_bg and actual_bg and expect_bg != actual_bg:
+        if not (expect_bg == "tougaard" and actual_bg == "file"):
+            raise ValueError("⛔ 背景不一致：模板要求 %s，实际用的是 %s —— background 字段只管拟合，"
+                             "不改变保存文件里的背景。先在软件里按模板扣好背景再重跑。" % (expect_bg, actual_bg))
+    for i, pk in enumerate(peaks):
+        fw = float(pk["fwhm"])
+        for lim, name in ((wlo, "wlo"), (whi, "whi")):
+            if lim is not None and abs(fw - float(lim)) <= 1e-6:
+                raise ValueError("⛔ 撞界：峰%d 的 FWHM=%g 正好顶在 %s=%g 上，这个值是约束决定的、"
+                                 "不是拟合出来的。先改初值 / 放宽 ctol 或 wlo/whi 后重跑，本次不落盘。"
+                                 % (i + 1, fw, name, float(lim)))
+    return True
+
+
+def _edge_warnings(path, peaks, ratio=3.0):
+    """峰心距谱两端 < ratio×FWHM → 尾部被截断，面积只是当前窗口的积分。"""
+    try:
+        E, _raw, _bg, _n = F.load(path)
+    except Exception:
+        return []
+    if not E:
+        return []
+    lo, hi = min(E), max(E)
+    out = []
+    for i, pk in enumerate(peaks):
+        fw = float(pk["fwhm"])
+        if fw <= 0:
+            continue
+        near = min(abs(float(pk["pos"]) - lo), abs(hi - float(pk["pos"])))
+        if near < ratio * fw:
+            out.append("⚠ 峰%d（%.3f eV）距谱端不到 %.0f×FWHM（实测 %.2f×）：尾部被截断，面积只按当前窗口积分。"
+                       % (i + 1, float(pk["pos"]), ratio, near / fw))
+    return out
+
+
 def do_build(a):
     """一次调用把一组峰参数落成可交付的 .xps（不需要人点 GUI）。
 
@@ -420,10 +485,15 @@ def do_build(a):
     if not peaks:
         raise ValueError("peaks 不能为空")
     out = os.path.normpath(a.get("out") or D.work_path("built.xps"))
+
+    build_guard(peaks, a.get("expect_bg"), a.get("actual_bg"), a.get("wlo"), a.get("whi"))
     spec = os.path.normpath(a["spec"]) if a.get("spec") else None
     par = os.path.normpath(a["par"]) if a.get("par") else None
+    edge = _edge_warnings(a["path"], peaks)
     r = D.build(EXE, a["path"], peaks, out, spec, par, a.get("bg"))
     txt = "已生成 %s（%d 字节）" % (r["xps"], r["xps_bytes"])
+    if edge:
+        txt = "\n".join(edge) + "\n" + txt
     if spec:
         txt += "\n谱图 %s" % spec
     if par:
@@ -503,7 +573,8 @@ TOOLS = [
       "bg_col": {"type": "number", "description": "背景列序号（1 起），默认 4"},
       "ds": {"type": "number", "description": "自旋轨道劈裂 ΔBE（eV）：S 2p=1.18，其他元素按文献值，默认 1.18"},
       "ratio": {"type": "number", "description": "伴线/主峰面积比，2p=0.5，d 轨道=2/3，默认 0.5"},
-      "eta": {"type": "number", "description": "%Lorentzian（0-1），默认 0.3"},
+      "eta": {"type": ["number", "array", "string"], "description": "%Lorentzian（0-1）：一个数=全部峰同值；数组或逗号串（如 0.48,1.0,1.0）=逐峰。实测谱常是主峰 0.4–0.5、卫星 1.0，别用标量糊过去"},
+      "expect_bg": {"type": "string", "enum": ["shirley", "linear", "tougaard", "file", "none"], "description": "模板要求的背景；给了就与实际 bg 比对，不一致判失败（tougaard 按 file 处理并警告）"},
       "ctol": {"type": "number", "description": "峰位初值允许移动的半宽 eV，默认 1.0；两个初值间距 < 0.5×ctol 会被直接拒绝（不可分离）"},
       "wlo": {"type": "number", "description": "FWHM 下限 eV，默认 0.6；谱里有更窄的峰必须调小，否则 FWHM 被压平在 0.6 这个假值上"},
       "whi": {"type": "number", "description": "FWHM 上限 eV，默认 4.0"},
@@ -524,7 +595,11 @@ TOOLS = [
       "out": dict(S, description="输出 .xps 绝对路径；省略则写 ~/xpspeak_auto/built.xps"),
       "spec": dict(S, description="可选：同时导出谱图 ASCII 到这个路径（用于复核面积）"),
       "par": dict(S, description="可选：同时导出峰参数表到这个路径"),
-      "bg": {"type": "boolean", "description": "是否先扣背景建区域；ASCII 源默认 true，.xps 源默认 false"}},
+      "bg": {"type": "boolean", "description": "是否先扣背景建区域；ASCII 源默认 true，.xps 源默认 false"},
+      "expect_bg": {"type": "string", "enum": ["shirley", "linear", "tougaard", "file", "none"], "description": "模板要求的背景类型；与 actual_bg 不一致拒绝保存"},
+      "actual_bg": {"type": "string", "enum": ["shirley", "linear", "tougaard", "file", "none"], "description": "这一次实际用的背景类型；与 expect_bg 不一致拒绝保存"},
+      "wlo": {"type": "number", "description": "拟合时用的 FWHM 下界；峰 FWHM 顶在该值上即判撞界、拒绝保存"},
+      "whi": {"type": "number", "description": "拟合时用的 FWHM 上界；同上"}},
      ["path", "peaks"]),
     ("xpspeak_status",
      "启动（若未运行）并返回进程号、窗体、按钮、全部菜单项和当前模式。任何操作前先调它。"

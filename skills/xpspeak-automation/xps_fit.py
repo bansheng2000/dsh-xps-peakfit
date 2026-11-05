@@ -97,11 +97,32 @@ def area_factor(eta):
     return eta * math.pi / 2.0 + (1.0 - eta) * math.sqrt(math.pi / (4.0 * LOG2))
 
 
+def eta_list(eta, nc):
+    """eta 可以是标量（全部峰同值）或长度 nc 的序列（逐峰 %Lorentzian）。
+
+    逐峰是必须的：实测谱里主峰 %GL 40–50%、卫星常到 100%，用一个标量会把卫星压成主峰的形状。
+    """
+    if isinstance(eta, (list, tuple)):
+        if len(eta) != nc:
+            raise ValueError("eta 序列长度 %d != 峰数 %d" % (len(eta), nc))
+        out = []
+        for i, v in enumerate(eta):
+            if not (0.0 <= float(v) <= 1.0):
+                raise ValueError("eta[%d]=%r 必须在 0–1" % (i, v))
+            out.append(float(v))
+        return out
+    v = float(eta)
+    if not (0.0 <= v <= 1.0):
+        raise ValueError("eta=%r 必须在 0–1" % (eta,))
+    return [v] * nc
+
+
 def model_at(x, p, nc, ds, ratio, eta):
+    et = eta_list(eta, nc)
     y = 0.0
     for k in range(nc):
         c, w, h = p[3 * k], p[3 * k + 1], p[3 * k + 2]
-        y += gl(x, c, w, h, eta) + gl(x, c + ds, w, h * ratio, eta)
+        y += gl(x, c, w, h, et[k]) + gl(x, c + ds, w, h * ratio, et[k])
     return y
 
 
@@ -190,6 +211,7 @@ def fit(E, raw, bg, centers, ds=1.18, ratio=0.5, eta=0.3,
     if idx is not None:
         E = [E[i] for i in idx]; raw = [raw[i] for i in idx]; bg = [bg[i] for i in idx]
     nc = len(centers)
+    et = eta_list(eta, nc)
     # 初值间距 < 0.5×ctol（= 峰位自由区的半宽）时两个组分不可分辨：LM 会把同一个峰劈成两半、
     # 各报 50%，而 50/50 是初值造成的、不是数据支撑的。0.5 eV 也远小于任何有物理意义的化学态
     # 位移（2p 双线 1.18 eV、3d 3.2 eV），所以真双峰不会被误拒。直接报错，不给一个看着正常的假结果。
@@ -210,6 +232,10 @@ def fit(E, raw, bg, centers, ds=1.18, ratio=0.5, eta=0.3,
         lo += [c - ctol, wlo, 0.0]
         hi += [c + ctol, whi, hmax]
     clamp = lambda q: [min(max(v, lo[i]), hi[i]) for i, v in enumerate(q)]
+    # 初值也必须落进 [lo,hi]：默认初值 FWHM=1.0 遇到 wlo=1.5 时已经在界外，
+    # 若 LM 一次都不接受步进，p 就停在界外、撞界检查（只比 p 与界）也发现不了 ——
+    # 结果是「参数越界但 res["bound"] 为空」，preflight 会放行一份不可信的结果。
+    p = clamp(p)
 
     def resid(q):
         return [target[i] - model_at(E[i], q, nc, ds, ratio, eta) for i in range(len(E))]
@@ -274,10 +300,10 @@ def fit(E, raw, bg, centers, ds=1.18, ratio=0.5, eta=0.3,
                 break
     mean_t = sum(target) / n
     sst = sum((t - mean_t) ** 2 for t in target)
-    af = area_factor(eta) * (1.0 + ratio)
     comps = []
     for i in range(nc):
         c, w, h = p[3 * i], p[3 * i + 1], p[3 * i + 2]
+        af = area_factor(et[i]) * (1.0 + ratio)
         area = h * w * af
         # σ_area 传播：area = h·w·af（af 只依赖 eta，与峰位无关）。只保留真正进公式的两项：
         #   · 补上 height 项 —— 原来漏了，σ 系统性偏小（本次修正的主项）；
@@ -289,7 +315,7 @@ def fit(E, raw, bg, centers, ds=1.18, ratio=0.5, eta=0.3,
         comps.append(dict(center=round(c, 4), center_err=round(sig[3 * i], 4),
                           partner=round(c + ds, 4), fwhm=round(w, 4), fwhm_err=round(sig[3 * i + 1], 4),
                           height=round(h, 1), area=round(area, 1), area_err=round(s_area, 1),
-                          bounds=atb.get(i, [])))
+                          eta=et[i], bounds=atb.get(i, [])))
     tot = sum(c["area"] for c in comps) or 1.0
     for c in comps:
         c["pct"] = round(100.0 * c["area"] / tot, 2)
@@ -297,7 +323,7 @@ def fit(E, raw, bg, centers, ds=1.18, ratio=0.5, eta=0.3,
     par = [c["center"] + ds for c in comps]
     for c, pv in zip(comps, par):
         c["partner"] = round(pv, 4)
-    return dict(nc=nc, n=n, k=k, ds=ds, ratio=ratio, eta=eta,
+    return dict(nc=nc, n=n, k=k, ds=ds, ratio=ratio, eta=(et if isinstance(eta, (list, tuple)) else et[0]), eta_list=et,
                 rms=round(math.sqrt(sse / n), 2), r2=round(1.0 - sse / sst, 6) if sst else None,
                 aic=round(n * math.log(sse / n) + 2 * k, 2), sse=round(sse, 2),
                 comps=comps, params=[float(v) for v in p], params_err=[round(v, 6) for v in sig], bound=bound,
@@ -305,6 +331,56 @@ def fit(E, raw, bg, centers, ds=1.18, ratio=0.5, eta=0.3,
                 window=dict(lo=win[0], hi=win[1]), n_points=len(E),
                 limits=dict(ctol=ctol, wlo=wlo, whi=whi, hmax=hmax), peak_max=round(max(target), 1),
                 curves=dict(E=E, target=target, fit=[target[i] - r[i] for i in range(n)], resid=r))
+
+
+def preflight(res, E=None, bg_used=None, expect_bg=None, edge_ratio=3.0):
+    """保存/建区域前的**硬前置**：不通过就不许落盘。
+
+    三条（缺一条都可能存出一份「看着完整、其实不可信」的 .xps）：
+      1. 撞界：res["bound"] 非空 → 参数顶在边界上，值是约束决定的、不是数据拟合出来的；
+      2. 背景不一致：模板说 linear、实际用了谱图自带（或反之）→ `background` 字段只影响拟合，
+         不影响保存文件里的背景，两者对不上时结论与图就不是一件事；
+      3. 边界截断：峰心距谱两端 < edge_ratio×FWHM → 尾部被切掉，面积只是当前窗口的积分。
+
+    返回 {"ok": bool, "errors": [...], "warnings": [...]}。errors 非空 → 调用方必须中止、不写文件。
+    """
+    errors, warnings = [], []
+    b = res.get("bound") or []
+    if b:
+        lines = ["组分%d %s=%g（%s 边界）" % (x["comp"], x["param"], x["value"], x["side"]) for x in b]
+        errors.append("撞界 %d 项：%s。先改初值、放宽 ctol 或 wlo/whi 后重跑，别拿这份参数保存。"
+                      % (len(b), "；".join(lines)))
+
+    if expect_bg and bg_used and expect_bg != bg_used:
+        if expect_bg == "tougaard" and bg_used == "file":
+            warnings.append("模板背景是 tougaard，xps_fit 没有这一项，实际按 file（谱图自带背景）处理 —— 报告里必须写明。")
+        else:
+            errors.append("背景不一致：模板要求 %s，实际用了 %s。`background` 字段只管拟合，不改变保存文件里的背景。"
+                          % (expect_bg, bg_used))
+
+    if E:
+        lo, hi = min(E), max(E)
+        for i, c in enumerate(res.get("comps") or []):
+            fw = float(c.get("fwhm") or 0.0)
+            if fw <= 0:
+                continue
+            left = float(c["center"]) - lo
+            right = hi - float(c.get("partner", c["center"]))
+            near = min(left, right)
+            if near < edge_ratio * fw:
+                warnings.append("组分%d（%.2f eV）峰心距谱端不到 %.0f×FWHM（实测 %.2f×）：尾部被截断，面积只按当前窗口积分。"
+                                % (i + 1, float(c["center"]), edge_ratio, near / fw))
+    return {"ok": not errors, "errors": errors, "warnings": warnings}
+
+
+def preflight_text(pf):
+    """把 preflight 结果排成人读的两行：⛔ 逐条错误 / ⚠ 逐条警告。"""
+    out = []
+    for e in pf.get("errors") or []:
+        out.append("⛔ " + e)
+    for w in pf.get("warnings") or []:
+        out.append("⚠ " + w)
+    return "\n".join(out)
 
 
 def bound_text(res):
@@ -331,8 +407,10 @@ def bound_text(res):
 
 def report(res, head="", include_bounds=True, include_warnings=True):
     L = [head] if head else []
-    L.append("模型: %d 条双峰（Δ=%.3f eV, 面积比 1:%.2f, 等宽, eta=%.2f）  n=%d  k=%d"
-             % (res["nc"], res["ds"], res["ratio"], res["eta"], res["n"], res["k"]))
+    et = res.get("eta_list") or [res.get("eta", 0.3)]
+    eta_txt = "%.2f" % et[0] if len(set(et)) == 1 else "/".join("%.2f" % v for v in et)
+    L.append("模型: %d 条双峰（Δ=%.3f eV, 面积比 1:%.2f, 等宽, eta=%s）  n=%d  k=%d"
+             % (res["nc"], res["ds"], res["ratio"], eta_txt, res["n"], res["k"]))
     L.append("拟合优度: rms=%.2f cps   R²=%s   AIC=%.2f" % (res["rms"], res["r2"], res["aic"]))
     w = res.get("window") or {}
     if w.get("lo") is not None:

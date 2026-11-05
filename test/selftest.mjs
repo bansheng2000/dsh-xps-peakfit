@@ -25,13 +25,16 @@ import {
   pseudoVoigt,
   readFavorites,
   readMode,
+  readSelection,
   removeTemplate,
   renameTemplate,
   sha256,
+  selectionFile,
   stateRoot,
   thumbSvg,
   useInstruction,
   validateTemplate,
+  writeSelection,
   writeFavorites,
 } from '../lib/routes.js';
 import { SERVER_FILES, packagedServerDir, syncServerFiles } from '../lib/index.js';
@@ -274,6 +277,38 @@ check('fit 步参数真来自模板：fwhm_max +0.5 → whi 跟着走，菜单�
     }
   }
 });
+// B1：选择态（一键化的入口）
+const selSet = await request(port, '/xps/selection', {
+  method: 'POST',
+  body: JSON.stringify({ templateId: id, spectrumPath: 'D:/data/Ni2p.dat' }),
+});
+check('POST /selection 写入并回读（templateId + spectrumPath）', () => {
+  assert.equal(selSet.status, 200);
+  assert.equal(selSet.json.selection.templateId, id);
+  assert.equal(selSet.json.selection.spectrumPath, 'D:/data/Ni2p.dat');
+  const back = readSelection(root);
+  assert.equal(back.templateId, id);
+  assert.ok(back.updatedAt > 0);
+});
+const selGet = await request(port, '/xps/selection');
+check('GET /selection 回读一致', () => {
+  assert.equal(selGet.status, 200);
+  assert.equal(selGet.json.selection.templateId, id);
+});
+const selClear = await request(port, '/xps/selection', { method: 'POST', body: JSON.stringify({ templateId: null }) });
+check('POST /selection templateId=null → 取消选择', () => {
+  assert.equal(selClear.status, 200);
+  assert.equal(selClear.json.selection.templateId, null);
+  assert.equal(readSelection(root).templateId, null);
+});
+writeFileSync(modeFile, '{"mode":"teach","updatedAt":3,"source":"tool"}', 'utf8');
+const selTeach = await request(port, '/xps/selection', { method: 'POST', body: JSON.stringify({ templateId: id }) });
+check('教学档 POST /selection → 403 teaching-mode', () => {
+  assert.equal(selTeach.status, 403);
+  assert.equal(selTeach.json.code, 'teaching-mode');
+});
+writeFileSync(modeFile, '{"mode":"exec","updatedAt":4,"source":"tool"}', 'utf8');
+
 const renamed = await request(port, `/xps/templates/${id}/rename`, { method: 'POST', body: JSON.stringify({ name: '改过的名字' }) });
 check('POST rename → 200', () => {
   assert.equal(renamed.status, 200);
@@ -293,7 +328,6 @@ check('DELETE → 200 且收藏已剔掉', () => {
 const noRoute = await request(port, '/xps/nope');
 check('未知子路由 → 404', () => assert.equal(noRoute.status, 404));
 await new Promise((resolve) => httpServer.close(resolve));
-
 /* ───────── 6. server/*.py 同步两分支 ───────── */
 
 /* ── schema v2：ctol / eta / 老模板回落 / observed 只作参照 / 详情表 ── */
@@ -328,8 +362,7 @@ check('③ 老模板（无 eta / 无 search_ev）→ ctol 1.0、eta 0.3，use �
   assert.equal(fit.arguments.eta, 0.3, 'eta 回落到默认 0.3');
 });
 
-check('⑦ 缺 eta 的模板 use 带非空 warnings；写了 eta 的不给警告', () => {
-  const noEta = { ...GOOD, peak_windows: [{ label: 'Mo 3d5/2', center_ev: 229.0 }] };
+check('⑦ 缺 eta 的模板 use 带非空 warnings；写了 eta 的不给警告', () => {  const noEta = { ...GOOD, peak_windows: [{ label: 'Mo 3d5/2', center_ev: 229.0 }] };
   const r1 = useInstruction(noEta, 'exec');
   assert.equal(r1.ok, true, '缺 eta 不是错误，不能拦');
   assert.ok(Array.isArray(r1.instruction.warnings) && r1.instruction.warnings.length > 0, '缺 eta 必须给非空 warnings');
@@ -492,6 +525,22 @@ check('「用这个」在教学档被前端禁用', () => {
   assert.match(clientSrc, /disabled: isTeach/);
   assert.match(clientSrc, /教学模式下不代执行/);
 });
+check('面板主按钮改走选择态：选这个 / 已选 / 取消选择，教学档两处禁用', () => {
+  assert.match(clientSrc, /api\("\/selection"/, '客户端必须打 POST /selection');
+  assert.match(clientSrc, /JSON\.stringify\(\{ templateId: null \}\)/, '取消选择要把 templateId 写成 null');
+  assert.match(clientSrc, /"取消选择"/, '顶部已选条要有取消选择按钮');
+  assert.match(clientSrc, /disabled: isTeach \|\| selectedId === null/, '教学档禁用取消选择');
+  assert.match(clientSrc, /className: `xpk-card\$\{template\.id === selectedId \? " on" : ""\}`/, '选中的卡片要高亮');
+});
+check('A5 字段语义四态：未记录 / 约束夹出 / 近似 / 实测（默认值不许伪装成实测）', () => {
+  assert.match(clientSrc, /\["项目", "模板值", "实测值", "来源"\]/, '详情表要有「来源」列');
+  assert.match(clientSrc, /约束夹出/, '约束性字段要标「约束夹出」');
+  assert.match(clientSrc, /未记录/, '没记录的要标「未记录」');
+  assert.match(clientSrc, /近似/, 'eta 回落默认值要标「近似」');
+  const routesSrc = readFileSync(join(REPO, 'lib', 'routes.js'), 'utf8');
+  assert.match(routesSrc, /doubletRaw === null \? null/, 'doublet_delta_ev 允许 null（=不做双线约束）');
+  assert.match(routesSrc, /charge_correction_ev === null/, 'charge_correction_ev 允许 null（=未记录）');
+});
 
 /* ───────── 8. 服务端不许有 MCP 调用 ───────── */
 
@@ -569,6 +618,125 @@ print(json.dumps([xps_fit.gl(x, 2.0, 1.2, 1000.0, 0.3) for x in ${JSON.stringify
     });
   });
 }
+
+/* ───────── 11. 拟合参数与保存前硬前置（纯 python 侧） ───────── */
+
+process.stdout.write('\n[11] 撞界不保存 / 逐峰 eta / 背景一致 / 边界截断\n');
+
+const pyForGuards = pyCandidates.find((c) => {
+  try {
+    execFileSync(c, ['-c', 'import sys'], { stdio: 'pipe', timeout: 15000 });
+    return true;
+  } catch {
+    return false;
+  }
+});
+
+const runPy = (code) => execFileSync(pyForGuards, ['-c', code], {
+  stdio: 'pipe',
+  timeout: 120000,
+  cwd: REPO,
+  env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+}).toString('utf8').trim();
+
+const MCP_SRC = readFileSync(join(REPO, 'server', 'xpspeak_mcp.py'), 'utf8');
+
+check('⑧ 撞界 → preflight 判失败、保存前置抛错、build_guard 在 D.build 之前', () => {
+  const out = runPy(`
+import json, math, os, sys, tempfile
+sys.path.insert(0, 'server')
+import xps_fit as F
+from xpspeak_mcp import build_guard
+E = [880 - 0.05 * i for i in range(600)]
+raw = [45000 * math.exp(-((e - 856.5) ** 2) / (2 * 0.5 ** 2)) + 10 for e in E]
+res = F.fit(E, raw, [10.0] * len(E), [856.5], ds=0.0, ratio=0.0, eta=0.3, wlo=1.5, whi=2.4, ctol=1.0)
+pf = F.preflight(res, E=E)
+out = os.path.join(tempfile.mkdtemp(), 'should-not-exist.xps')
+blocked = False
+try:
+    build_guard([{'pos': 856.5, 'fwhm': 1.5}], None, None, 1.5, 2.4)
+except ValueError as e:
+    blocked = '撞界' in str(e)
+print(json.dumps({'bound': [b['param'] + ':' + b['side'] for b in res['bound']],
+                  'ok': pf['ok'], 'blocked': blocked, 'exists': os.path.exists(out),
+                  'r2': res['r2']}))
+`);
+  const r = JSON.parse(out);
+  assert.ok(r.bound.includes('fwhm:lo'), `这段谱必须把 FWHM 顶到 wlo，实际 bound=${r.bound}`);
+  assert.equal(r.ok, false, 'preflight 必须判失败');
+  assert.equal(r.blocked, true, 'build_guard 必须抛「撞界」');
+  assert.equal(r.exists, false, '被拦下时不许有输出文件');
+  assert.ok(r.r2 > 0.9, `这个样本拟合本身是像样的（R²=${r.r2}），所以才必须靠撞界拦，而不是靠优度`);
+  const body = MCP_SRC.slice(MCP_SRC.indexOf('def do_build('), MCP_SRC.indexOf('def do_close('));
+  assert.ok(body.indexOf('build_guard(') > 0 && body.indexOf('build_guard(') < body.indexOf('D.build('),
+    'build_guard 必须在 D.build 之前调用（否则先落盘再报错 = 撞界仍存了一份）');
+});
+
+check('⑨ 逐峰 eta 生效（两个峰不同 %GL → fit 里 eta 是数组且逐峰对得上）', () => {
+  const out = runPy(`
+import json, math, sys
+sys.path.insert(0, 'server')
+import xps_fit as F
+E = [880 - 0.05 * i for i in range(600)]
+raw = [(45000 * math.exp(-((e - 856.5) ** 2) / (2 * 0.5 ** 2))
+        + 20000 * math.exp(-((e - 862.0) ** 2) / (2 * 0.5 ** 2)) + 10) for e in E]
+res = F.fit(E, raw, [10.0] * len(E), [856.5, 862.0], ds=0.0, ratio=0.0, eta=[0.48, 1.0], ctol=1.0)
+print(json.dumps({'eta_list': res['eta_list'], 'eta': res['eta'],
+                  'comps': [c['eta'] for c in res['comps']], 'r2': res['r2']}))
+`);
+  const r = JSON.parse(out);
+  assert.deepEqual(r.eta_list, [0.48, 1.0], 'eta 序列必须原样进模型');
+  assert.deepEqual(r.comps, [0.48, 1.0], '每个组分要带自己的 eta');
+  assert.deepEqual(r.eta, [0.48, 1.0], 'res.eta 在逐峰时也应是序列（report 要逐峰显示）');
+});
+
+check('⑩ 背景不一致 → build_guard 拒绝；tougaard 按 file 只警告不拦', () => {
+  const out = runPy(`
+import json, math, sys
+sys.path.insert(0, 'server')
+import xps_fit as F
+from xpspeak_mcp import build_guard
+peaks = [{'pos': 856.5, 'fwhm': 1.1}]
+bad = False
+try:
+    build_guard(peaks, 'linear', 'file', None, None)
+except ValueError as e:
+    bad = '背景不一致' in str(e)
+tg = build_guard(peaks, 'tougaard', 'file', None, None)
+E = [880 - 0.05 * i for i in range(600)]
+raw = [45000 * math.exp(-((e - 856.5) ** 2) / (2 * 0.5 ** 2)) + 10 for e in E]
+res = F.fit(E, raw, [10.0] * len(E), [856.5], ds=0.0, ratio=0.0, eta=0.3, wlo=0.6, whi=4.0, ctol=1.0)
+pf = F.preflight(res, bg_used='file', expect_bg='tougaard')
+ok_same = F.preflight(res, bg_used='linear', expect_bg='linear')['ok']
+print(json.dumps({'bad': bad, 'tougaard_ok': tg, 'tougaard_warn': pf['warnings'],
+                  'tougaard_ok_preflight': pf['ok'], 'same_bg_ok': ok_same}))
+`);
+  const r = JSON.parse(out);
+  assert.equal(r.bad, true, 'linear 模板 + file 背景必须拒绝');
+  assert.equal(r.tougaard_ok, true, 'tougaard 按 file 处理：允许保存');
+  assert.equal(r.tougaard_ok_preflight, true, 'tougaard 不阻断');
+  assert.equal(r.same_bg_ok, true, '背景一致时不许乱拦');
+  assert.ok(r.tougaard_warn.some((w) => w.includes('tougaard')), '但必须给警告');
+});
+
+check('⑪ 峰心距谱端 < 3×FWHM → 边界截断警告（远离的不报）', () => {
+  const out = runPy(`
+import json, math, os, sys, tempfile
+sys.path.insert(0, 'server')
+from xpspeak_mcp import _edge_warnings
+p = os.path.join(tempfile.mkdtemp(), 'spec.dat')
+with open(p, 'w', encoding='utf-8') as fh:
+    for i in range(600):
+        e = 880 - 0.05 * i
+        fh.write('%.2f %.1f' % (e, 10 + 100 * math.exp(-((e - 856.5) / 0.5) ** 2)) + chr(10))
+print(json.dumps({'near': _edge_warnings(p, [{'pos': 850.4, 'fwhm': 1.0}]),
+                  'far': _edge_warnings(p, [{'pos': 866.0, 'fwhm': 1.0}])}))
+`);
+  const r = JSON.parse(out);
+  assert.ok(r.near.length > 0, '贴近边界必须警告');
+  assert.ok(r.near[0].includes('尾部被截断'), '警告要说明尾部被截断');
+  assert.deepEqual(r.far, [], '远离边界不该报');
+});
 
 /* ───────── 结果 ───────── */
 

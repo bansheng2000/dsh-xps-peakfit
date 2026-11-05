@@ -2,6 +2,20 @@
 
 `SKILL.md` 正文只保留当前版本号与一行说明；完整历史记在这里（正文顶部原来那条约 1,800 字符的变更行已搬到此文件，避免每次触发都把它载入上下文）。
 
+## 未发版修订（A1–A5 修缺陷 / B1–B3 一键化）
+
+版本仍 `2.8.0`，判据与四步流程未改，只补了「保存前硬前置」与「点一下就出结果」的入口。
+
+- **A1 撞界必须中止**：`server/xps_fit.py:preflight()`、`server/xpspeak_mcp.py:build_guard()`；`xpspeak_build` 在 `D.build()` 之前调 guard，撞界直接抛错、不落 `.xps`；`xpspeak_fit` 文本把 `⛔` 置顶并写明「已阻断保存」。**顺带补掉一个真漏洞**：默认初值 FWHM=1.0 遇到 `wlo=1.5` 时本就在界外，若 LM 一次步进都没接受，`res.bound` 会是空的（越界却不报）——现在初值先 clamp 进 `[lo,hi]`，越界必然被标出。
+- **A2 逐峰 eta**：`eta_list()` / `model_at()` / `fit()` 接受标量或长度=nc 的序列；`res.eta_list`、每组分 `eta`、`report()` 逐峰显示；`useInstruction` 逐峰取 `observed.gl_pct/100`，全相等时才退化成标量。
+- **A3 背景一致性**：`preflight(bg_used, expect_bg)` 与 `build_guard(expect_bg, actual_bg)` 不一致即拒绝；`tougaard` 不在 `xps_fit` 支持内，按 `file` 处理但必须报警。
+- **A4 边界截断**：`_edge_warnings()` 与 `preflight(edge_ratio=3.0)` 对「峰心距谱端 < 3×FWHM」报「尾部被截断，面积只按当前窗口积分」，build 结果前置显示。
+- **A5 字段语义**：`doublet_delta_ev` / `charge_correction_ev` 允许 `null`（= 未记录 / 不做双线约束，不再把 `0` 当实测值）；详情表新增「来源」列，四态 `实测 / 约束夹出 / 近似 / 未记录`。
+- **B1 选择态**：`lib/routes.js:selectionFile/readSelection/writeSelection` + `GET/POST /xps/selection`（教学档 403、模板不存在 404、`templateId: null` = 取消）；面板主按钮改「选这个」，选中卡片高亮、顶部「已选」条 + 取消选择。
+- **B2 说明书**：`SKILL.md` 新增「选择态：用户说『按模板做』→ 一次跑完」一节（不带编号）。
+- **B3 向后兼容**：`use` 路由保留，面板「用这个」降为次要按钮；教学档两处禁用 + 服务端 403。
+- 自检 57 → 67 项（新增 selection 四条、⑧–⑪ 四条、客户端契约两条）；`sync_skills.py` 仍管 7 个文件。
+
 ## v2.8.0（未发版）：插件壳 + 模板页
 
 本轮把仓库变成 DSH 插件包，**判据、算法与四步流程一字未改**。版本号写 `package.json`（`2.8.0`：不低于旧线 1.2.2 / 2.7.2，也不暗示算法变化），`SKILL.md` 正文未动。

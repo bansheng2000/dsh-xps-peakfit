@@ -241,6 +241,18 @@ whenToUse: 用户给出 XPS 数据（全谱和/或高分辨谱），要求做荷
 5. **教学档**：模板页按钮禁用，服务端对 `use` 返回 403 `teaching-mode`。此时改走手工四步、把模板字段念给用户听；不许悄悄切档，也不许换通道绕过。
 6. **模板峰位来自文献或用户，不是数据来源**：拟合仍走第 3 步的门槛、残差判定与结论字段；模板再漂亮也不能替数据说话（对齐铁律第一条）。
 
+### 选择态：用户说「按模板做」→ 一次跑完
+
+用户只说一句「按模板做 / 用这个模板」，agent 自己读完再动手，不回头问第二遍参数。
+
+1. **先读选择态**：`~/.dsh/dsh-xps-peakfit/selection.json`（面板「选这个」写入；`GET /xps/selection` 读同一份）→ `{templateId, spectrumPath, updatedAt, lastRun}`。`templateId` 为 null 或模板已删 → 请用户在面板点「选这个」（连同谱图路径一起填），不要自己猜模板、也不要随手挑一个收藏项代替。
+2. **一次取齐参数**：模板字段按上节映射表转成 `xpspeak_fit` 参数；逐峰 `eta` 取 `peak_windows[i].observed.gl_pct/100`（没有才回落模板 `eta`），`ctol = 各峰 search_ev 的最大值`，`bg` 按 `background` 映射。
+3. **执行顺序**：`xpspeak_open`（`spectrumPath`）→ `xpspeak_fit`。档位闸门照旧：教学档停在手工四步，不许代执行。
+4. **硬前置拦住就不许落盘**：撞界（`res.bound` 非空）、背景不一致、峰心距谱端 < 3×FWHM 的截断警告——**任一出现就停下**，不 `xpspeak_export`、不 `xpspeak_save`，把原因写回 `selection.lastRun`（`POST /xps/selection` 带 `lastRun`，`templateId`/`spectrumPath` 保持原值），再如实报给用户。
+5. **全过才交付**：`xpspeak_export` → `xpspeak_save`，然后把峰表（中心 / FWHM / 面积 / 占比 / ±σ）与来源（谱图路径、模板名、生成的文件）写回 `lastRun`。
+6. **教学档**：`POST /xps/selection` 返回 403 `teaching-mode`，面板按钮同样禁用；此时改手工四步、把模板字段念给用户听，不许悄悄切档或换通道绕过。
+7. **选择态只是入口，不是判据**：模板峰位仍来自文献或用户，结论仍走第 3、4 步的门槛与残差判定；边界截断即使放行，也必须把「面积只按当前窗口积分」写进产物。
+
 ### 步骤 3：高分辨分峰
 
 | 本轮允许放开 | 本轮必须固定 | 进入下一步的通过条件 |

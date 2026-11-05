@@ -30,6 +30,7 @@ import {
   sha256,
   stateRoot,
   thumbSvg,
+  useInstruction,
   validateTemplate,
   writeFavorites,
 } from '../lib/routes.js';
@@ -256,6 +257,23 @@ check('代执行档 use → 200 且只给指令', () => {
   assert.ok(Array.isArray(useExec.json.instruction.steps) && useExec.json.instruction.steps.length >= 4);
   assert.equal(useExec.json.instruction.fields.element, GOOD.element);
 });
+check('「用这个」的 steps 不含裸 Add Peak 菜单步（菜单通道不接收位置/宽度参数）', () => {
+  const steps = useExec.json.instruction.steps;
+  const bare = steps.filter((s) => s.tool === 'xpspeak_menu' && s.arguments !== undefined && s.arguments.top === 'Add Peak');
+  assert.equal(bare.length, 0, `steps 里不能有裸 xpspeak_menu Add Peak（只会建空峰壳），实际 ${bare.length} 条`);
+});
+check('fit 步参数真来自模板：fwhm_max +0.5 → whi 跟着走，菜单步不承载参数', () => {
+  const t2 = { ...GOOD, fwhm_max: GOOD.fwhm_max + 0.5 };
+  const ins = useInstruction(t2, 'exec').instruction;
+  const fits = ins.steps.filter((s) => s.tool === 'xpspeak_fit');
+  assert.equal(fits.length, 1, 'steps 里必须恰有一个 xpspeak_fit');
+  assert.equal(fits[0].arguments.whi, t2.fwhm_max, 'whi 必须取模板 fwhm_max');
+  for (const s of ins.steps) {
+    if (s.tool === 'xpspeak_menu') {
+      assert.doesNotMatch(String(s.why), /[0-9]/, '菜单步不承载参数（峰位/宽度一律交给 xpspeak_fit）');
+    }
+  }
+});
 const renamed = await request(port, `/xps/templates/${id}/rename`, { method: 'POST', body: JSON.stringify({ name: '改过的名字' }) });
 check('POST rename → 200', () => {
   assert.equal(renamed.status, 200);
@@ -340,7 +358,10 @@ check('TAB_ID === TAB_KIND === "xps"（槽位 key 同一字符串）', () => {
 });
 check('兼容别名不带 guide（否则「+」菜单多一个入口）', () => {
   assert.match(clientSrc, /guide: null/);
-  assert.match(clientSrc, /COMPAT_KIND = "xps-templates"/);
+});
+check('兼容别名 COMPAT_ID === COMPAT_KIND === "xps-templates"（id/kind/槽位 key 同一字符串）', () => {
+  assert.match(clientSrc, /const COMPAT_ID = "xps-templates";/);
+  assert.match(clientSrc, /const COMPAT_KIND = COMPAT_ID;/);
 });
 check('用 createElement，不用 jsx-runtime', () => {
   assert.match(clientSrc, /const \{ createElement: jsx \} = React;/);

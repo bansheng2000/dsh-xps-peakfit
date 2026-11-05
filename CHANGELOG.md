@@ -15,6 +15,10 @@
 - **回环校验**：`/xps/*` 全部要求 Host 与 peer 双回环，否则 403（插件路由不在宿主鉴权墙后面）。
 - **自检**：`test/selftest.mjs`（46 项，纯 node 无依赖，只碰临时目录），`node test/selftest.mjs` → `selftest OK: 46 项全过`。
 
+- **「用这个」的步骤改成真能执行的链**：原实现逐个 `xpspeak_menu {top:"Add Peak"}`（菜单通道不接收位置/宽度，只会建空峰壳）→ 改为 `xpspeak_status` → `xpspeak_open` → `xpspeak_fit`（`centers`/`ds`/`ratio`/`wlo`/`whi`/`bg`）→ `xpspeak_export` → `xpspeak_save`，并新增 `notes` 说明「Add Peak 不接收参数、要手工加壳请在软件里点」与 `search_ev` 是窗口半宽；`tougaard` 背景映射为 `bg=file`。返回键名 `{ok, instruction:{template,name,fields,steps,notes}}` 未改。
+- **兼容别名 id/kind 统一**：`COMPAT_ID = COMPAT_KIND = "xps-templates"`（原 `xps/compat` 与 kind 不同字符串，违反「id = kind = 槽位 key」），`guide` 仍为 `null`；主类型 `"xps"` 未动。
+- **说明书补模板页一节**：`SKILL.md` 在第 3 步之前新增「模板页与「用这个」的返回值」（无编号标题），写死字段→工具参数映射与「不映射面积/峰高」、`search_ev` 语义、教学档 403、模板不是数据来源。
+- **自检 +3 条**：steps 不得含裸 `xpspeak_menu Add Peak`、`fwhm_max` 变化必须带动 fit 的 `whi`、别名 id/kind 同一字符串（三条都对旧代码先跑红）。
 - **并入 XPS 全线（仓库结构）**：`skills/xpspeak-automation/`（软件自动化技能：`SKILL.md` + 三个 py 的技能内副本）搬入本仓库；旧仓库 `dsh-xpspeak` 整仓（含 `.git` 与历史）迁到 `legacy/dsh-xpspeak/` 只读留存，外层 `.gitignore` 加 `legacy/`，嵌套仓库不被外层跟踪。
 - **脚本路径**：`check_skills.py` 的 `BASE` 换成脚本所在目录（本仓库内自定位），两个 SKILL 路径改指仓库根 `SKILL.md` 与 `skills/xpspeak-automation/SKILL.md`；`sync_skills.py` 源本来就在本仓库，未改。
 - **同步脚本扩到两个技能**：`sync_skills.py` 从 3 个文件扩到 7 个（主技能 `SKILL.md` + `references/`，加 `skills/xpspeak-automation/` 的 `SKILL.md` 与三个 py），干净态 `OK=7`；EXTRA 四态保留（副本里多出来的文件照样报红），安装位 `~/.dsh/dsh-xps-peakfit/server/` 明确不归它管。

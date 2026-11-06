@@ -1,5 +1,12 @@
 # 变更记录
 
+## 第十四批补：I1 第三臂（模板复现）+ runlog 自动谱哈希
+
+- **`template-copied` 的第三臂（`lib/audit.js` `fitMirrorsTemplate`）**：模板 `provenance.source_file` 是 `2.xls（Ni2p Scan）`、被审谱却是派生的 `ni2p_cc.dat` 时，哈希臂与 basename 臂都永远判不出同源 —— 用户照模板复现一次仍被判 fail（实测 Ni 2p 交付：`counts {pass:4,warn:3,fail:1}`，verdict fail）。
+  现在补一条：`run.json.templateId` 等于模板 id，且 `run.json.fit` 的实参与模板导出参数**逐项相等**（各峰 centers 1e-6、`wlo/whi` = `fwhm_min/max`、eta 逐峰、ctol（模板为空时比峰窗 `search_ev`）、window = `fit_window_ev`、bg = `background`）→ `template-copied` 判 `warn`，detail 写「实参与模板逐项一致（…）：模板复现，不是独立拟合」。任何一项被改就回到 `fail`（可证伪：改一个 center +0.01 eV 即红）。
+  同一份真实产物复跑结果：`template-copied=warn`、verdict `warn`、`counts {pass:4,warn:4,fail:0,skip:0}`（其余 warn 是 peak-gap 6.0% 与两处边界截断，属既有口径）。
+- **runlog 自动补 `spectrumSha256`（`lib/routes.js`）**：body 没显式给时，若 `dir` 里能**唯一**定位到 `*_spectrum.dat`（或 `.txt`/`.csv`）就顺手算一个；候选多于一个就留空 —— 不猜一条谱的哈希。
+
 ## 未发版修订（第十四批：同源谱降 warn、runlog 键名白名单）
 
 版本仍 `2.8.0`。

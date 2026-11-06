@@ -2396,6 +2396,81 @@ print(json.dumps({"a": a["r2"], "b": b["r2"], "c": c["r2"], "d": d["r2"],
   assert.equal(out.doc_866, true, 'docstring 要写清全谱 vs 窗口 Shirley 的实测差 866 cps');
 });
 
+
+// I1d：第三臂（模板复现）。模板来自 2.xls、审计谱是派生的 .dat —— 哈希与 basename 都判不出来，
+// 只有「run.json 的 fit 实参与模板逐项相等」这一条能证明「照模板原样复现」。
+const i1dDir = join(tmp, 'i1d');
+mkdirSync(i1dDir, { recursive: true });
+const i1dSpec = join(i1dDir, 'derived_cc.dat');
+writeFileSync(i1dSpec, readFileSync(i1spec));
+const i1dTpl = {
+  ...i1tpl,
+  id: 'i1d-tpl',
+  provenance: { source_file: '2.xls（Ni2p Scan）' },
+  fwhm_min: 1.0,
+  fwhm_max: 5.0,
+  ctol: null,
+  peak_windows: [
+    { label: 'a', center_ev: 870, eta: 0.3, search_ev: 1.5, observed: { fwhm_ev: 1.6, gl_pct: 30 } },
+    { label: 'b', center_ev: 875, eta: 0.3, search_ev: 1.5, observed: { fwhm_ev: 1.0, gl_pct: 30 } },
+  ],
+};
+const i1dFit = {
+  centers: [870, 875], wlo: 1, whi: 5, eta: [0.3, 0.3], ctol: 1.5, window: [864, 880], bg: 'linear',
+};
+const i1dRun = join(i1dDir, 'run.json');
+writeFileSync(i1dRun, JSON.stringify({ templateId: 'i1d-tpl', createdAt: '2026-01-01T00:00:00.000Z', fit: i1dFit, artifacts: [] }), 'utf8');
+const i1d = auditArtifacts({ spectrumPath: i1dSpec, peaksPath: i1peaks, template: i1dTpl, runPath: i1dRun });
+
+// 只把第一个峰位改 0.01 eV：就必须回到 fail —— 这一臂的可证伪性在这里
+const i1dRunBad = join(i1dDir, 'run_bad.json');
+writeFileSync(i1dRunBad, JSON.stringify({
+  templateId: 'i1d-tpl', createdAt: '2026-01-01T00:00:00.000Z',
+  fit: { ...i1dFit, centers: [870.01, 875] }, artifacts: [],
+}), 'utf8');
+const i1dBad = auditArtifacts({ spectrumPath: i1dSpec, peaksPath: i1peaks, template: i1dTpl, runPath: i1dRunBad });
+
+// I2b：body 没给 spectrumSha256 时按 dir 里唯一的 *_spectrum.dat 自动算；有歧义就不写
+const i2bDir = join(tmp, 'i2b');
+mkdirSync(i2bDir, { recursive: true });
+const i2bSpec = join(i2bDir, 'Ni2p_spectrum.dat');
+writeFileSync(i2bSpec, 'B.E.\tIntensity\n880\t1000\n879\t1010\n', 'utf8');
+const i2bAmb = join(tmp, 'i2b_amb');
+mkdirSync(i2bAmb, { recursive: true });
+writeFileSync(join(i2bAmb, 'a_spectrum.dat'), 'B.E.\tIntensity\n880\t1000\n', 'utf8');
+writeFileSync(join(i2bAmb, 'b_spectrum.dat'), 'B.E.\tIntensity\n881\t1000\n', 'utf8');
+const i2bSrv = createServer(createRoutes({ root, env: { ...process.env, XPSPEAK_ROOT: root, XPSPEAK_MODE: '', XPSPEAK_MODE_FILE: '' } }));
+await new Promise((resolve) => i2bSrv.listen(0, '127.0.0.1', resolve));
+const i2bPort = i2bSrv.address().port;
+const i2bAuto = await request(i2bPort, '/xps/runlog', {
+  method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dir: i2bDir, files: [] }),
+});
+const i2bTwo = await request(i2bPort, '/xps/runlog', {
+  method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dir: i2bAmb, files: [] }),
+});
+await new Promise((resolve) => i2bSrv.close(resolve));
+
+check('I1d 第三臂：run.json 实参与模板逐项一致 → 判模板复现（warn），改一个 center 0.01 eV 就回 fail', () => {
+  const c = i1d.checks.find((x) => x.id === 'template-copied');
+  assert.ok(c, JSON.stringify(i1d.checks));
+  assert.equal(c.status, 'warn', c.detail);
+  assert.match(c.detail, /逐项一致/, 'detail 要写清判据是「实参与模板逐项一致」：' + c.detail);
+  assert.match(c.detail, /模板复现/, 'detail 要说清这是模板复现、不是独立拟合：' + c.detail);
+  assert.equal(i1d.verdict, 'warn', '模板复现不该整体判 fail：' + i1d.checks.map((x) => x.id + '=' + x.status).join(' | '));
+  const bad = i1dBad.checks.find((x) => x.id === 'template-copied');
+  assert.equal(bad.status, 'fail', '改了一个峰位就不再是逐项一致，必须回到 fail：' + bad.detail);
+  assert.equal(i1dBad.verdict, 'fail');
+});
+
+check('I2b runlog 自动 spectrumSha256：dir 里唯一谱文件才算，出现歧义不许猜', () => {
+  assert.equal(i2bAuto.status, 200, JSON.stringify(i2bAuto.json));
+  const auto = JSON.parse(readFileSync(join(i2bDir, 'run.json'), 'utf8'));
+  assert.equal(auto.spectrumSha256, sha256(readFileSync(i2bSpec)), '唯一命中时要顺手记下谱的 sha256');
+  assert.equal(i2bTwo.status, 200, JSON.stringify(i2bTwo.json));
+  const amb = JSON.parse(readFileSync(join(i2bAmb, 'run.json'), 'utf8'));
+  assert.equal(amb.spectrumSha256 ?? null, null, '两条候选就必须留空，不许挑一条猜');
+});
+
 /* ───────── 结果 ───────── */
 
 if (failures.length > 0) {

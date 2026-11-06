@@ -1048,11 +1048,11 @@ check('包内缺文件 → missing-in-package（不反向覆盖）', () => {
   const copiedFiles = [];
   const run = syncServerFiles({ from: partial, to, copy: (_s, d) => { copiedFiles.push(d); } });
   const missing = run.filter((r) => r.action === 'missing-in-package').map((r) => r.file).sort();
-  assert.deepEqual(missing, ['xps_fit.py', 'xpspeak_drive.py']);
+  assert.deepEqual(missing, ['xps_fit.py', 'xpspeak_drive.py', 'xpspeak_import.py']);
   // 缺的那两个绝不能被安装位反向覆盖：复制只可能发生在包内确实有的那个文件上
   assert.deepEqual(copiedFiles.map((d) => d.split(/[\\/]/).pop()), ['xpspeak_mcp.py']);
 });
-check('包内真实三 py 都在且与安装位同源', () => {
+check('包内真实四 py 都在且与安装位同源', () => {
   const pkg = packagedServerDir();
   const installed = join(stateRoot({ ...process.env }), 'server');
   for (const file of SERVER_FILES) {
@@ -1129,13 +1129,22 @@ check('A5 字段语义四态：未记录 / 约束夹出 / 近似 / 实测（默�
 /* ───────── 8. 服务端不许有 MCP 调用 ───────── */
 
 process.stdout.write('\n[8] 服务端无 MCP 调用（闸门单点在 MCP）\n');
-check('lib/*.js 不含 child_process / 连接器 API / 工具调用', () => {
+check('lib/*.js 不含连接器 API / MCP 工具调用；child_process 只许跑导入脚本这一条', () => {
   for (const file of readdirSync(join(REPO, 'lib'))) {
     if (!file.endsWith('.js')) continue;
     const src = readFileSync(join(REPO, 'lib', file), 'utf8');
-    assert.doesNotMatch(src, /child_process/, `${file} 里有 child_process`);
     assert.doesNotMatch(src, /mcp-connector\/api/, `${file} 里调了连接器 API`);
     assert.doesNotMatch(src, /xpspeak_[a-z]+\s*\(/, `${file} 里直接调了 MCP 工具`);
+    if (/child_process/.test(src)) {
+      // 「闸门单点在 MCP」管的是拟合/建区这类会改数据的动作。模板导入（打开 .xps -> 导出两份文本）
+      // 不产生也不修改任何谱或峰，允许它起一个只跑 server/xpspeak_import.py 的子进程；
+      // 除此之外 lib/ 里不许再出现别的 spawn（尤其不许 shell:true 拼命令行）。
+      assert.equal(file, 'routes.js', `${file} 不许用 child_process（只有模板导入需要跑 python）`);
+      const spawns = src.match(/spawn\(\s*[^,]+,\s*[A-Za-z_$][\w$]*/g) ?? [];
+      assert.equal(spawns.length, 1, 'routes.js 只允许一处 spawn：' + JSON.stringify(spawns));
+      assert.match(src, /const args = \[importScriptPath\(env\), '--in'/, 'spawn 的参数必须是导入脚本');
+      assert.doesNotMatch(src, /shell:\s*true/, '不许 shell:true（拼命令行会把路径当命令）');
+    }
   }
 });
 
@@ -2469,6 +2478,175 @@ check('I2b runlog 自动 spectrumSha256：dir 里唯一谱文件才算，出现�
   assert.equal(i2bTwo.status, 200, JSON.stringify(i2bTwo.json));
   const amb = JSON.parse(readFileSync(join(i2bAmb, 'run.json'), 'utf8'));
   assert.equal(amb.spectrumSha256 ?? null, null, '两条候选就必须留空，不许挑一条猜');
+});
+
+
+/* ───────── 19. 导入 .xps 生成模板草稿 ───────── */
+
+process.stdout.write('\n[19] 导入 .xps → 模板草稿（POST /xps/import）\n');
+
+const impFx = join(REPO, 'test', 'fixtures', 'import');
+const impRoot = join(tmp, 'imp');
+mkdirSync(impRoot, { recursive: true });
+const impBytes = Buffer.concat([Buffer.from('XPSPEAK 4.0DP', 'latin1'), Buffer.alloc(64, 0x20)]);
+
+function importEnv(extra, mode = '') {
+  return {
+    ...process.env,
+    XPSPEAK_ROOT: impRoot,
+    XPSPEAK_MODE: mode,
+    XPSPEAK_MODE_FILE: '',
+    XPS_IMPORT_EXTRA_ARGS: extra,
+    XPS_IMPORT_TIMEOUT_MS: '60000',
+  };
+}
+function importListen(env) {
+  const srv = createServer(createRoutes({ root: impRoot, env }));
+  return new Promise((resolve) => srv.listen(0, '127.0.0.1', () => resolve(srv)));
+}
+function importPost(port, filename, body = impBytes) {
+  return request(port, '/xps/import?filename=' + encodeURIComponent(filename), {
+    method: 'POST',
+    headers: { 'content-type': 'application/octet-stream' },
+    body,
+  });
+}
+
+const impSrvShirley = await importListen(importEnv('--replay ' + join(impFx, 'shirley')));
+const impShirley = await importPost(impSrvShirley.address().port, 'Ni2p_demo.xps');
+await new Promise((resolve) => impSrvShirley.close(resolve));
+
+const impSrvLinear = await importListen(importEnv('--replay ' + join(impFx, 'linear')));
+const impLinear = await importPost(impSrvLinear.address().port, 'Co_2p_scan.xps');
+await new Promise((resolve) => impSrvLinear.close(resolve));
+
+const impSrvFile = await importListen(importEnv('--replay ' + join(impFx, 'file')));
+const impFile = await importPost(impSrvFile.address().port, 'S2p.xps');
+await new Promise((resolve) => impSrvFile.close(resolve));
+
+const impSrvReject = await importListen(importEnv('--replay ' + join(impFx, 'shirley')));
+const impRejPort = impSrvReject.address().port;
+const impRpa = await importPost(impRejPort, 'a.rpa');
+const impTxt = await importPost(impRejPort, 'a.txt');
+const impBadHead = await importPost(impRejPort, 'bad.xps', Buffer.from('NOTXPSPEAK-AT-ALL', 'latin1'));
+mkdirSync(join(impRoot, 'imports'), { recursive: true });
+writeFileSync(join(impRoot, 'imports', '.lock'), 'held', 'utf8');
+const impBusy = await importPost(impRejPort, 'busy.xps');
+rmSync(join(impRoot, 'imports', '.lock'), { force: true });
+await new Promise((resolve) => impSrvReject.close(resolve));
+
+const impSrvTeach = await importListen(importEnv('--replay ' + join(impFx, 'shirley'), 'teach'));
+const impTeach = await importPost(impSrvTeach.address().port, 'teach.xps');
+await new Promise((resolve) => impSrvTeach.close(resolve));
+
+const impStub = join(impRoot, 'stub-nopeaks.json');
+writeFileSync(impStub, JSON.stringify({ ok: false, code: 'no-peaks', message: '导出里没有峰（Peak 参数为空）' }), 'utf8');
+const impSrvStub = await importListen(importEnv('--stub-json ' + impStub));
+const impNoPeaks = await importPost(impSrvStub.address().port, 'nopeaks.xps');
+await new Promise((resolve) => impSrvStub.close(resolve));
+
+const impSrvNoExe = await importListen(importEnv('--exe C:/nope/XPSPEAK41.EXE'));
+const impNoExe = await importPost(impSrvNoExe.address().port, 'noexe.xps');
+await new Promise((resolve) => impSrvNoExe.close(resolve));
+
+check('J1 导入回包：草稿峰位/FWHM/eta 逐峰、背景判 shirley、fit_window 取交集、模板键从文件名预填', () => {
+  assert.equal(impShirley.status, 200, impShirley.text.slice(0, 400));
+  const d = impShirley.json.draft;
+  assert.equal(d.background, 'shirley', '背景要按文件 Background 列判，不许一律 shirley/linear');
+  assert.deepEqual(d.peak_windows.map((p) => p.center_ev), [870, 874, 877], '峰位要逐项来自导出的 Peak 参数');
+  assert.deepEqual(d.peak_windows.map((p) => p.observed.fwhm_ev), [1.2, 2.4, 1.6]);
+  assert.deepEqual(d.peak_windows.map((p) => p.eta), [0.3, 0.6, 0.9], 'eta 必须逐峰取 GL/100，不许取第一峰的标量');
+  assert.deepEqual(d.fit_window_ev, { lo: 862.8, hi: 880 }, 'fit_window = 首峰-3FWHM 到 末峰+3FWHM，与谱范围取交集');
+  assert.equal(d.applicable_window_ev, 20, '数据宽度用谱范围');
+  assert.equal(d.fwhm_min, 0.9, 'FWHM 下限 = min×0.75');
+  assert.equal(d.fwhm_max, 3, 'FWHM 上限 = max×1.25');
+  assert.equal(d.element, 'Ni', '文件名认得出来就预填元素');
+  assert.equal(d.orbital, '2p');
+  assert.equal(d.category, '高分辨谱');
+  assert.equal(d.provenance.source_file, 'Ni2p_demo.xps');
+  assert.equal(d.provenance.points, 201);
+  assert.match(String(d.provenance.sha256), /^[0-9a-f]{64}$/, 'sha256 要写进 provenance');
+  assert.equal(impShirley.json.sha256, d.provenance.sha256);
+  assert.equal(validateTemplate(d).ok, true, '生成的草稿必须能直接过 validateTemplate：' + JSON.stringify(validateTemplate(d).errors));
+  assert.equal(existsSync(impShirley.json.importPath), false, '导入成功后源 .xps 不另存（原文件在用户磁盘）');
+  assert.equal(existsSync(impShirley.json.resultPath), true, 'imports/<时间戳>.json 要留下草稿');
+  assert.match(impShirley.json.warnings.join('\n'), /交集/, '窗口被交集裁剪要出 warning');
+  assert.equal(existsSync(join(impRoot, 'imports', '.lock')), false, '结束要放锁');
+});
+
+check('J2 linear 夹具 → background=linear；J3 台阶背景 → file 且写明两路偏离', () => {
+  assert.equal(impLinear.status, 200, impLinear.text.slice(0, 300));
+  assert.equal(impLinear.json.draft.background, 'linear');
+  assert.equal(impLinear.json.draft.element, 'Co');
+  assert.equal(impFile.status, 200, impFile.text.slice(0, 300));
+  assert.equal(impFile.json.draft.background, 'file', '既不像直线也不像 Shirley 就按 file 存');
+  assert.match(impFile.json.warnings.join('\n'), /既不像直线也不像 Shirley/, '要写出两路偏离，不能只说“不像”');
+  assert.match(impFile.json.warnings.join('\n'), /12\.6%/, '偏离数值要写出来');
+});
+
+check('J4 拒绝路径：.rpa/.txt/文件头/教学档/忙/没峰/找不到 XPSPeak 各自的状态码与 code', () => {
+  assert.equal(impRpa.status, 415, impRpa.text);
+  assert.equal(impRpa.json.code, 'rpa-not-supported');
+  assert.match(impRpa.json.message, /没有谱图|缺/, '要说明 .rpa 缺谱');
+  assert.equal(impTxt.status, 415, impTxt.text);
+  assert.equal(impTxt.json.code, 'not-xps');
+  assert.equal(impBadHead.status, 415, impBadHead.text);
+  assert.equal(impBadHead.json.code, 'not-xps');
+  assert.match(impBadHead.json.message, /XPSPEAK 4\.0/);
+  assert.equal(impTeach.status, 403);
+  assert.equal(impTeach.json.code, 'teaching-mode');
+  assert.equal(impBusy.status, 409, impBusy.text);
+  assert.equal(impBusy.json.code, 'import-busy');
+  assert.equal(impNoPeaks.status, 422, impNoPeaks.text);
+  assert.equal(impNoPeaks.json.code, 'no-peaks');
+  assert.equal(impNoExe.status, 501, impNoExe.text);
+  assert.equal(impNoExe.json.code, 'xpspeak-not-found');
+});
+
+check('J5 imports/*.json 只留最近 20 份；J6 草稿能直接 POST /xps/templates?filename=meta.json', async () => {
+  const dir = join(impRoot, 'imports');
+  for (let i = 0; i < 26; i += 1) {
+    writeFileSync(join(dir, '202001010000' + String(i).padStart(2, '0') + '.json'), '{}', 'utf8');
+  }
+  const srv = await importListen(importEnv('--replay ' + join(impFx, 'shirley')));
+  const r = await importPost(srv.address().port, 'prune.xps');
+  // 文件名认不出元素/轨道时，草稿的 element/orbital/category 必须为空，先证它过不了模板校验
+  const raw = await request(srv.address().port, '/xps/templates?filename=meta.json', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(r.json.draft),
+  });
+  const posted = await request(srv.address().port, '/xps/templates?filename=meta.json', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ...r.json.draft, element: 'Ni', orbital: '2p', category: '高分辨谱' }),
+  });
+  await new Promise((resolve) => srv.close(resolve));
+  const kept = readdirSync(dir).filter((f) => /^\d{14}\.json$/.test(f));
+  assert.equal(r.status, 200, r.text.slice(0, 200));
+  assert.equal(kept.length, 20, 'imports/ 只留最近 20 份草稿，多了按时间删旧的：' + kept.length);
+  assert.equal(raw.status, 400, '缺 element/orbital/category 的草稿不许落盘：' + raw.text.slice(0, 200));
+  assert.match(raw.text, /element|orbital|category/, raw.text.slice(0, 200));
+  assert.equal(posted.status, 201, '新建模板回 201（created）：' + posted.text.slice(0, 200));
+  assert.equal(posted.json.ok, true);
+  removeTemplate(posted.json.template.id, impRoot);
+});
+
+
+check('J7 面板：导入按钮存在、提交前必须补齐 element/orbital/category（不许绕过）', () => {
+  const src = readFileSync(join(REPO, 'lib', 'client.js'), 'utf8');
+  assert.match(src, /导入 \.xps/, '面板要有「导入 .xps」入口');
+  assert.match(src, /accept: "\.xps"/, '文件选择器只收 .xps');
+  assert.match(src, /fetch\(`\$\{BASE\}\/import\?filename=/, '上传走 POST /xps/import');
+  assert.match(src, /"name", "element", "orbital", "category"\]\.filter\(/, '提交前要检查这四个键');
+  assert.match(src, /模板元数据必填/, '缺键要明确报错，不许静默保存');
+  // 必填检查必须在 submitDraft 自己的提交之前：先算出 missing，再 POST（别被 upload() 里的同名 fetch 骗到）
+  const iFn = src.indexOf('const submitDraft = async () =>');
+  const iCheck = src.indexOf('const missing = ["name", "element", "orbital", "category"]', iFn);
+  const iPost = src.indexOf('fetch(`${BASE}/templates?filename=', iFn);
+  assert.ok(iFn > 0, '面板里要有 submitDraft');
+  assert.ok(iCheck > iFn && iPost > iCheck, '必填检查要排在保存请求之前');
+  assert.match(src, /className: String\(draft\[key\] \?\? ""\)\.trim\(\) === "" \? "req" : ""/, '空的检索键要标红');
 });
 
 /* ───────── 结果 ───────── */

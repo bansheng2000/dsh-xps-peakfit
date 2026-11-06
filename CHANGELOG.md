@@ -1,5 +1,15 @@
 # 变更记录
 
+## 第十五批：从 .xps 导入模板（峰参数取软件导出、背景判定与 audit 同源）
+
+版本仍 `2.8.0`。
+
+- **新脚本 `server/xpspeak_import.py`**：打开 `.xps` → 导出 `_peaks.dat`/`_spectrum.dat` → 生成模板草稿。纯函数 `suggest_from_name()`（Ni/Co/Fe 2p、Mo 3d、S 2p、C 1s、O 1s，空格/下划线/大小写都容忍）、`parse_peak_params()`、`parse_spectrum()`、`classify_background()`（`xps_fit.linear_bg`/`shirley_bg`，按扣背景峰高归一，<0.5% 判类型、都不过判 `file`）、`build_draft()`；测试通道 `--replay <dir>`（读现成的两份导出文本）与 `--stub-json`。
+- **`POST /xps/import?filename=…`**（`lib/routes.js`）：教学档 403；`.rpa` 415（没谱）；非 `.xps`/文件头不是 `XPSPEAK 4.0` 415；>20 MB 413；`imports/.lock` 并发 409（陈锁 >5 min 视为上次被杀）；脚本 `no-peaks` 422、`xpspeak-not-found` 501、超时 504；成功后写 `imports/<时间戳>.json`（只留 20 份）并**删掉落盘的源 `.xps`**（原名与 `sha256` 已进草稿 provenance）。`--source-name` 传用户上传时的原始文件名，别把时间戳前缀写进 provenance。
+- **面板**：新增「导入 .xps」（隐藏 input `accept=".xps"`）+ 草稿条：显示识别出的元素/轨道、峰数、背景、拟合区、来源与 sha256 前缀；`name/element/orbital/category` 四个输入框预填，空的标红，`submitDraft` 在**发请求之前**就拒（缺键不许保存），过了才 `POST /xps/templates?filename=meta.json` 复用既有 schema 校验。
+- **修掉一个真 bug**：`.xps` 文件头检查原来比前 13 字节与 `'XPSPEAK 4.0'`（11 字符），永远不相等 → 任何真文件都被判 `not-xps`。真实文件头是 `XPSPEAK 4.0D` 后直接跟二进制，改成只比前 11 字节。
+- **自检**：`[19]` 段 J1–J7（草稿逐项、linear/file 两档、拒绝路径、prune 20 份、草稿能直接过 `validateTemplate` 并 POST 成功、面板必填不许绕过），142 项全过。四处变异各真红一条（背景判定恒 shirley → J2/J3；eta 取标量 → J1；fit_window 不取交集 → J1；不删源 `.xps` → J1）。
+
 ## 第十四批补：I1 第三臂（模板复现）+ runlog 自动谱哈希
 
 - **`template-copied` 的第三臂（`lib/audit.js` `fitMirrorsTemplate`）**：模板 `provenance.source_file` 是 `2.xls（Ni2p Scan）`、被审谱却是派生的 `ni2p_cc.dat` 时，哈希臂与 basename 臂都永远判不出同源 —— 用户照模板复现一次仍被判 fail（实测 Ni 2p 交付：`counts {pass:4,warn:3,fail:1}`，verdict fail）。

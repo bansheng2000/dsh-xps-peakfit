@@ -250,7 +250,7 @@ whenToUse: 用户给出 XPS 数据（全谱和/或高分辨谱），要求做荷
 2. **一次取齐参数**：模板字段按上节映射表转成 `xpspeak_fit` 参数；逐峰 `eta` 取 `peak_windows[i].eta`（没有才回落模板 `eta`；`observed.gl_pct` 只作对照，不进拟合），`ctol = 各峰 search_ev 的最大值`，`bg` 按 `background` 映射；`window` 取模板 `fit_window_ev`（与谱范围取交集）—— 不传 window 等于拿整条谱拟合，窗口外未建模的峰（如 2p1/2）会把 R² 拉到 0.4–0.6 并逼着峰往边界跑。
 3. **执行顺序**：`xpspeak_open`（`spectrumPath`）→ `xpspeak_fit`。档位闸门照旧：教学档停在手工四步，不许代执行。闸看的是**拟合区** `fit_window_ev`：本次谱宽不足其 90% → `use` 直接 422，不许绕过；90%–100% 放行并给 warnings；`window` 与谱范围取交集，无交集直接 422 `window-outside-spectrum`。`applicable_window_ev` 只管「数据够不够长」的提示，**不再当拟合窗口**（文件扫描宽度 ≠ 拟合区：同一份 Ni 2p 谱 40 eV 全窗 R²=0.5869、4 项撞界，收到 844.37–866 后 R²=0.9481、无撞界）。
 4. **硬前置拦住就不许落盘**：撞界（`res.bound` 非空）、背景不一致、峰心距谱端 < 3×FWHM 的截断警告——**任一出现就停下**，不 `xpspeak_export`、不 `xpspeak_save`，把原因写回 `selection.lastRun`（`POST /xps/selection` 带 `lastRun`，`templateId`/`spectrumPath` 保持原值），再如实报给用户；同时把这次的门检查与失败原因写进 `run.json`（`POST /xps/runlog`，见下节）。
-5. **全过才交付**：`xpspeak_export` → `xpspeak_save`，然后把峰表（中心 / FWHM / 面积 / 占比 / ±σ）与来源（谱图路径、模板名、生成的文件）写回 `lastRun`，并调 `POST /xps/runlog` 在产物目录落 `run.json`（同一目录已有 `run.json` 时返回 **409 `runlog-exists`** 并原样带回旧内容，不覆盖 `createdAt`；确要重写必须显式传 `overwrite: true`）：模板 id、实际 fit 参数、R²/rms/撞界/门检查、每个产物的 sha256 与字节数、时间。`run.json` 是这次交付的凭证 —— 没有它，事后无法证明这份图是这条谱、这组参数跑出来的。
+5. **全过才交付**：`xpspeak_export` → `xpspeak_save`。建区前先把背景口径统一：把本次 `window` 一并传给 `xpspeak_build`（默认 `crop=true`）—— XPSPeak 建区按**整条谱**算 Shirley，`xpspeak_fit` 只在拟合窗口内取端点，两者在窗口内平均可差 866 cps（实测 ni2p_cc.dat），Peak Sum 会系统性偏低、R² 从 0.9923 掉到 0.9682；不一致时 build 自动裁谱并在返回里写明裁了哪些点，`crop=false` 则直接拒绝（不许静默建区），然后把峰表（中心 / FWHM / 面积 / 占比 / ±σ）与来源（谱图路径、模板名、生成的文件）写回 `lastRun`，并调 `POST /xps/runlog` 在产物目录落 `run.json`（同一目录已有 `run.json` 时返回 **409 `runlog-exists`** 并原样带回旧内容，不覆盖 `createdAt`；确要重写必须显式传 `overwrite: true`）：模板 id、实际 fit 参数、R²/rms/撞界/门检查、每个产物的 sha256 与字节数、时间。`run.json` 是这次交付的凭证 —— 没有它，事后无法证明这份图是这条谱、这组参数跑出来的。
 6. **教学档**：`POST /xps/selection` 返回 403 `teaching-mode`，面板按钮同样禁用；此时改手工四步、把模板字段念给用户听，不许悄悄切档或换通道绕过。
 7. **选择态只是入口，不是判据**：模板峰位仍来自文献或用户，结论仍走第 3、4 步的门槛与残差判定；边界截断即使放行，也必须把「面积只按当前窗口积分」写进产物。
 
@@ -264,6 +264,8 @@ whenToUse: 用户给出 XPS 数据（全谱和/或高分辨谱），要求做荷
 4. **verdict 的用法**：`fail` 不许当结论引用，先按 detail 指出的那一项修（改峰数 / 改背景 / 重拟合）；`warn` 可以在产物里如实标注后使用；`skip` 是「这项没条件审」（缺模板、缺列、背景不是 linear），不是通过。**全 skip 时 `verdict` 是 `insufficient`（不是 `pass`）**：`summary.counts` 给 `{pass, warn, fail, skip}` 四项计数，引用 verdict 前先确认至少有一条实质检查跑过。
 
 ### 保存前的校验链（七道门，阈值与依据）
+
+背景口径也是硬闸：`xpspeak_build` 先用 `bg_plan()` 核对「全谱 Shirley vs 拟合区 Shirley」，不一致默认裁谱；落盘后再用 `bg_consistency()` 回读导出谱的 Background 列，与模型窗口背景平均差超 0.5% 峰高（且 >20 cps）就删掉刚写出的 `.xps` 并报错 —— 拟合区背景 ≠ 全谱背景，建区前必须先统一。
 
 `xpspeak_fit` 的 `preflight` 与 `xpspeak_build` 的 `build_guard` 是**保存前**的硬闸：任何一条 errors 都意味着「不许落盘」，不是建议、更不能跳过。
 

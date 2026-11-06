@@ -1,5 +1,15 @@
 # 变更记录
 
+## 未发版修订（第八批：建区背景口径与拟合统一）
+
+版本仍 `2.8.0`。
+
+- **拟合区背景 ≠ 全谱背景**：`xpspeak_fit` 只在拟合窗口内取 Shirley 端点，XPSPeak 建区按整条谱算 —— 实测 `ni2p_cc.dat`（401 点）窗口 845.68–866.9 内平均差 866 cps，同组参数直接 fit 的 R²=0.9923，经 `xpspeak_build` 建区后审计只剩 0.9682、残差四段全正（+1037/+1227/+883/+58）。
+- `server/xpspeak_mcp.py`：新增 `BG_SCOPE_TOL=0.005` / `BG_SCOPE_FLOOR=20.0` 与 `bg_scope_check()` / `crop_to_window()` / `bg_consistency()` / `bg_plan()`；`do_build` 在 `D.build` 之前决定用哪条谱（不一致默认裁到拟合窗口，`crop=false` 抛错），落盘后回读导出谱 Background 再核一道，超差即删 `.xps` 并报 cps 与修法。
+- `xpspeak_build` 参数新增 `window` / `crop`（9 个工具名不变）；返回文本写明是否裁谱、裁了多少点、临时谱路径。
+- 文档：`SKILL.md` 选择态第 5 条与校验链一节、`README.md` 选择态一段，各写明「建区前先把背景口径统一」。
+- 自检 101 → 105（Z7 全谱 vs 拟合区实测 −866 cps；Z8 裁后 213 点、差 <20；Z9 导出谱用全谱背景判失败、用窗口背景判通过；Z10 `crop=false` 拒绝且 `bg_plan` 在 `D.build` 之前）；两处变异均真红。
+
 ## 未发版修订（第七批：全 skip 判 insufficient）
 
 版本仍 `2.8.0`。

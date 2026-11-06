@@ -74,7 +74,7 @@ XPS 分峰拟合 SOP —— 一个给 AI agent 用的 skill（Agent Skills 目�
 
 **保存前校验链**：`server/xps_fit.py:preflight()` 与 `server/xpspeak_mcp.py:build_guard()` 在落盘前判七条——撞界、背景不一致、未优化参数（初值=终值）、R²<0.85、残差四段任一段 >0.5×rms、峰顶缺口 >10%、linear 模板的 Background 列偏离直线 >0.5% 峰高；任一 errors 即阻断（build 侧会删掉刚写出的 `.xps`）。阈值常量在 `server/xps_fit.py` 顶部，依据写在 `SKILL.md`「保存前的校验链」一节。
 
-**选择态（一键化入口）**：面板主按钮「选这个」把 `{templateId, spectrumPath}` 写进 `~/.dsh/dsh-xps-peakfit/selection.json`（`GET/POST /xps/selection`，`templateId: null` = 取消选择），选中卡片高亮、顶部显示「已选：xxx → 谱图路径」，并提供「取消选择」。用户说一句「按模板做」，agent 就读它一次跑完（`xpspeak_open` → `xpspeak_fit` → 过硬前置 → `export`/`save`）；撞界 / 背景不一致 / 边界截断任一出现就停下，并把原因写回 `selection.lastRun`。`use` 路由保留向后兼容；教学档两处都禁用且服务端 403。
+**选择态（一键化入口）**：面板主按钮「选这个」把 `{templateId, spectrumPath}` 写进 `~/.dsh/dsh-xps-peakfit/selection.json`（`GET/POST /xps/selection`，`templateId: null` = 取消选择），选中卡片高亮、顶部显示「已选：xxx → 谱图路径」，并提供「取消选择」。用户说一句「按模板做」，agent 就读它一次跑完（`xpspeak_open` → `xpspeak_fit` → 过硬前置 → `export`/`save`）；建区时把同一个 `window` 传给 `xpspeak_build`（默认 `crop=true` 自动裁到拟合窗口，`crop=false` 直接拒绝）：拟合区背景 ≠ 全谱背景，不统一会让 Peak Sum 系统性偏低（实测差 866 cps，R² 0.9923→0.9682）；撞界 / 背景不一致 / 边界截断任一出现就停下，并把原因写回 `selection.lastRun`。`use` 路由保留向后兼容；教学档两处都禁用且服务端 403。
 
 数据目录：`~/.dsh/dsh-xps-peakfit/`（`templates/<id>/meta.json`、`favorites.json`、`mode.json`、`server/`）。pnpm 重装 node_modules 不会清这里。
 

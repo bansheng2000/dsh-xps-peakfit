@@ -497,6 +497,113 @@ def _bg_guard_spec(spec):
     return bs
 
 
+# ── 背景口径：拟合区 Shirley ≠ 全谱 Shirley ───────────────────────────────
+# 实测反例（2026-11-06，ni2p_cc.dat 401 点 844.8–884.8）：xps_fit 只在拟合窗口
+# 845.68–866.9 内取 Shirley 端点，XPSPeak 建区却按整条谱算 —— 窗口内平均低 866 cps，
+# 于是同一组峰参数直接 fit 的 R²=0.9923，经 build 建区后审计只剩 0.9682，残差四段
+# 全正（+1037/+1227/+883/+58）。容差取平均差 ≤0.5% 扣背景峰高，并留 20 cps 绝对下限
+# （低计数谱的百分比会把噪声放大）。
+BG_SCOPE_TOL = 0.005
+BG_SCOPE_FLOOR = 20.0
+
+
+def _window_indices(E, window):
+    lo, hi = min(window), max(window)
+    idx = [i for i, v in enumerate(E) if lo - 1e-9 <= v <= hi + 1e-9]
+    if len(idx) < 8:
+        raise ValueError("拟合窗口 [%g, %g] eV 内只有 %d 点（<8）：无法核对背景" % (lo, hi, len(idx)))
+    return idx, lo, hi
+
+
+def bg_scope_check(path, window):
+    """全谱 Shirley 与窗口 Shirley 在拟合区内的逐点差（模型谱侧）。
+
+    XPSPeak 建区按整条谱算背景，xps_fit 只按拟合窗口算；两者在这段里的平均差就是
+    Peak Sum 的系统性偏差。返回 {ok, mean_diff, max_abs_diff, pct_of_height, height,
+    points, window}；ok=False 表示必须先把谱裁到拟合窗口（或改口径）再建区。
+    """
+    E, raw, _bg, _ncol = F.load(path, bg_col=0)
+    idx, lo, hi = _window_indices(E, window)
+    Ew = [E[i] for i in idx]
+    rw = [raw[i] for i in idx]
+    full = F.shirley_bg(E, raw)
+    win = F.shirley_bg(Ew, rw)
+    diffs = [full[idx[j]] - win[j] for j in range(len(idx))]   # 全谱背景 − 拟合区背景（负=文件里更低）
+    mean_d = sum(diffs) / float(len(diffs))
+    max_d = max(abs(d) for d in diffs)
+    height = max(rw[j] - win[j] for j in range(len(idx)))
+    pct = (abs(mean_d) / height) if height > 0 else 0.0
+    ok = (pct <= BG_SCOPE_TOL) or (abs(mean_d) <= BG_SCOPE_FLOOR)
+    return {"ok": ok, "mean_diff": mean_d, "max_abs_diff": max_d,
+            "pct_of_height": pct, "height": height, "points": len(idx),
+            "window": [lo, hi]}
+
+
+def crop_to_window(path, window, dest):
+    """把谱裁到拟合窗口，写成两列 ASCII（BE 降序），供 XPSPeak 建区用。"""
+    E, raw, _bg, _ncol = F.load(path, bg_col=0)
+    idx, lo, hi = _window_indices(E, window)
+    with open(dest, "w", encoding="ascii", newline="\n") as fh:
+        for i in idx:
+            fh.write("%.4f %.6f\n" % (E[i], raw[i]))
+    return {"used": os.path.normpath(dest), "kept": len(idx),
+            "removed": len(E) - len(idx), "from_points": len(E),
+            "range_ev": [E[idx[-1]], E[idx[0]]], "window": [lo, hi]}
+
+
+def bg_consistency(export_spec, model_spectrum, window):
+    """回读导出谱的 Background 列，与建区所用谱的窗口 Shirley 在拟合区内逐点比。
+
+    这是落盘后的第二道：XPSPeak 到底把哪条背景写进文件，只能从导出列看出来。
+    """
+    Ee, _rawe, bge, _n = F.load(export_spec)
+    if not bge:
+        return {"ok": False, "note": "导出谱没有 Background 列，无法核对建区背景",
+                "mean_diff": 0.0, "max_abs_diff": 0.0, "pct_of_height": 0.0, "points": 0}
+    Em, rawm, _b, _n = F.load(model_spectrum, bg_col=0)
+    idx, lo, hi = _window_indices(Em, window)
+    got = {}
+    for i, v in enumerate(Ee):
+        if lo - 1e-9 <= v <= hi + 1e-9:
+            got[round(v, 3)] = bge[i]
+    model = F.shirley_bg(Em, rawm)
+    diffs = []
+    for i in idx:
+        v = got.get(round(Em[i], 3))
+        if v is not None:
+            diffs.append(v - model[i])
+    if len(diffs) < 8:
+        return {"ok": False, "note": "导出谱与模型谱在窗口内对不上（%d 点）" % len(diffs),
+                "mean_diff": 0.0, "max_abs_diff": 0.0, "pct_of_height": 0.0, "points": len(diffs)}
+    mean_d = sum(diffs) / float(len(diffs))
+    max_d = max(abs(d) for d in diffs)
+    height = max(rawm[i] - model[i] for i in idx)
+    pct = (abs(mean_d) / height) if height > 0 else 0.0
+    ok = (pct <= BG_SCOPE_TOL) or (abs(mean_d) <= BG_SCOPE_FLOOR)
+    return {"ok": ok, "mean_diff": mean_d, "max_abs_diff": max_d,
+            "pct_of_height": pct, "height": height, "points": len(diffs)}
+
+
+def bg_plan(path, window, out_xps, crop=True):
+    """决定建区用哪条谱：一致就用原谱；不一致默认裁谱，crop=False 直接拒绝（不静默）。"""
+    chk = bg_scope_check(path, window)
+    if chk["ok"]:
+        return {"used": path, "scope": chk, "crop": None, "before": None}
+    if not crop:
+        raise ValueError(
+            "⛔ 背景口径不一致：拟合区 Shirley 与全谱 Shirley 在窗口内平均差 %.0f cps"
+            "（= 峰高 %.1f%%，容差 %.2f%%）。XPSPeak 建区按整条谱算背景，Peak Sum 会系统性偏低。"
+            "修法：把 window 传进来由我裁谱重建（默认 crop=true），或先把谱裁到拟合窗口再 build。"
+            % (chk["mean_diff"], 100.0 * chk["pct_of_height"], 100.0 * BG_SCOPE_TOL))
+    dest = os.path.splitext(out_xps)[0] + "_fitwin.dat"
+    info = crop_to_window(path, window, dest)
+    chk2 = bg_scope_check(info["used"], window)
+    if not chk2["ok"]:
+        raise ValueError("⛔ 裁谱到拟合窗口后背景仍不一致（平均差 %.0f cps）：检查 window 与谱范围是否对得上"
+                         % chk2["mean_diff"])
+    return {"used": info["used"], "scope": chk2, "crop": info, "before": chk}
+
+
 def do_build(a):
     """一次调用把一组峰参数落成可交付的 .xps（不需要人点 GUI）。
 
@@ -510,9 +617,49 @@ def do_build(a):
     build_guard(peaks, a.get("expect_bg"), a.get("actual_bg"), a.get("wlo"), a.get("whi"))
     spec = os.path.normpath(a["spec"]) if a.get("spec") else None
     par = os.path.normpath(a["par"]) if a.get("par") else None
-    edge = _edge_warnings(a["path"], peaks)
-    r = D.build(EXE, a["path"], peaks, out, spec, par, a.get("bg"))
+    win = a.get("window")
+    plan = None
+    used = a["path"]
+    if win and a.get("bg") is not False:
+        plan = bg_plan(a["path"], [float(win[0]), float(win[1])], out, a.get("crop", True))
+        used = plan["used"]
+    verify = spec
+    tmp_verify = None
+    if plan is not None and not verify:
+        tmp_verify = os.path.splitext(out)[0] + "_bgcheck.dat"
+        verify = tmp_verify
+    edge = _edge_warnings(used, peaks)
+    r = D.build(EXE, used, peaks, out, verify, par, a.get("bg"))
     txt = "已生成 %s（%d 字节）" % (r["xps"], r["xps_bytes"])
+    if plan is not None:
+        cons = bg_consistency(verify, used, win)
+        if not cons.get("ok"):
+            try:
+                os.remove(out)
+            except OSError as rm_exc:
+                raise ValueError("⛔ 建区背景与拟合背景不一致：%s（⚠ 本次写出的 %s 删除失败（%s）："
+                                 "盘上仍有一份不可信的 .xps，请手动删）"
+                                 % (cons.get("note") or "平均差超容差", out, rm_exc))
+            raise ValueError("⛔ 建区背景与拟合背景不一致：导出谱 Background 与拟合窗口 Shirley 平均差 "
+                             "%.0f cps（= 峰高 %.1f%%，容差 %.2f%%）—— Peak Sum 会系统性偏低。"
+                             "修法：把谱裁到拟合窗口再 build（默认 crop=true 会自动裁）。本次已删除 %s。"
+                             % (cons["mean_diff"], 100.0 * cons["pct_of_height"],
+                                100.0 * BG_SCOPE_TOL, out))
+        txt += "\n背景口径: 与拟合一致（平均差 %.0f cps、最大 %.0f cps，%d 点）" % (
+            cons["mean_diff"], cons["max_abs_diff"], cons["points"])
+        if plan.get("crop"):
+            c = plan["crop"]
+            txt += "\n已自动裁谱到拟合窗口 %.2f–%.2f eV（%d → %d 点，去掉 %d 点；临时谱 %s）" % (
+                c["range_ev"][0], c["range_ev"][1], c["from_points"], c["kept"],
+                c["removed"], c["used"])
+        if plan.get("before"):
+            b = plan["before"]
+            txt += "\n（原谱全谱背景在窗口内平均低 %.0f cps，不裁谱就会让 Peak Sum 系统性偏低）" % b["mean_diff"]
+        if tmp_verify:
+            try:
+                os.remove(tmp_verify)
+            except OSError:
+                pass
     bg_ok = None
     if spec and a.get("expect_bg") == "linear":
         try:
@@ -633,7 +780,11 @@ TOOLS = [
       "expect_bg": {"type": "string", "enum": ["shirley", "linear", "tougaard", "file", "none"], "description": "模板要求的背景类型；与 actual_bg 不一致拒绝保存"},
       "actual_bg": {"type": "string", "enum": ["shirley", "linear", "tougaard", "file", "none"], "description": "这一次实际用的背景类型；与 expect_bg 不一致拒绝保存"},
       "wlo": {"type": "number", "description": "拟合时用的 FWHM 下界；峰 FWHM 顶在该值上即判撞界、拒绝保存"},
-      "whi": {"type": "number", "description": "拟合时用的 FWHM 上界；同上"}},
+      "whi": {"type": "number", "description": "拟合时用的 FWHM 上界；同上"},
+      "window": {"type": "array", "items": {"type": "number"},
+                 "description": "本次 xpspeak_fit 用的拟合窗口 [lo, hi]（eV）：给了就核对「全谱 Shirley」与「窗口 Shirley」，不一致时默认自动裁谱到该窗口再建区，避免 Peak Sum 系统性偏低"},
+      "crop": {"type": "boolean",
+               "description": "背景口径不一致时是否自动裁谱到拟合窗口（默认 true）；false = 直接拒绝，不静默建区"}},
      ["path", "peaks"]),
     ("xpspeak_status",
      "启动（若未运行）并返回进程号、窗体、按钮、全部菜单项和当前模式。任何操作前先调它。"

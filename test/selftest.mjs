@@ -1345,6 +1345,134 @@ print(json.dumps({'near': _edge_warnings(p, [{'pos': 850.4, 'fwhm': 1.0}]),
   assert.deepEqual(r.far, [], '远离边界不该报');
 });
 
+/* ───────── 12. 背景口径：拟合区 Shirley ≠ 全谱 Shirley ───────── */
+
+process.stdout.write('\n[12] 背景口径：拟合区 Shirley 与全谱 Shirley 必须统一\n');
+
+const niSrc = 'E:\\文档\\deepseek-harness\\ceshiqu\\out\\20261106-ni2p-scan\\ni2p_cc.dat';
+const niAvail = existsSync(niSrc);
+if (niAvail) process.env.XPS_NI_PATH = niSrc;
+
+check('Z7 全谱 vs 拟合区 Shirley：实测平均差 ≈ −866 cps（该谱必须判不一致）', () => {
+  if (!niAvail) {
+    process.stdout.write('  skip 缺少 ni2p_cc.dat，跳过实测复现（不静默通过）\n');
+    return;
+  }
+  const r = JSON.parse(runPy(`
+import json, os, sys
+sys.path.insert(0, 'server')
+try:
+    import xpspeak_mcp as M
+    out = M.bg_scope_check(os.environ['XPS_NI_PATH'], [845.68, 866.9])
+except Exception as e:
+    out = {'error': type(e).__name__ + ': ' + str(e)}
+print(json.dumps(out))`));
+  assert.equal(r.error, undefined, r.error);
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.ok(r.mean_diff < -500, `拟合区背景必须明显低于全谱，实际平均差 ${r.mean_diff} cps`);
+  assert.equal(r.points, 213, '845.7–866.9 应切到 213 点');
+  assert.ok(r.pct_of_height > 0.005, `占峰高比例要超容差，实际 ${r.pct_of_height}`);
+});
+
+check('Z8 裁到拟合窗口后：213 点、背景口径一致（平均差 < 20 cps）', () => {
+  if (!niAvail) {
+    process.stdout.write('  skip 缺少 ni2p_cc.dat\n');
+    return;
+  }
+  const r = JSON.parse(runPy(`
+import json, os, sys, tempfile
+sys.path.insert(0, 'server')
+try:
+    import xpspeak_mcp as M
+    dest = os.path.join(tempfile.mkdtemp(), 'cropped.dat')
+    info = M.crop_to_window(os.environ['XPS_NI_PATH'], [845.68, 866.9], dest)
+    chk = M.bg_scope_check(info['used'], [845.68, 866.9])
+    out = {'info': info, 'chk': chk}
+except Exception as e:
+    out = {'error': type(e).__name__ + ': ' + str(e)}
+print(json.dumps(out))`));
+  assert.equal(r.error, undefined, r.error);
+  assert.equal(r.info.kept, 213, JSON.stringify(r.info));
+  assert.equal(r.info.from_points, 401);
+  assert.equal(r.info.removed, 188);
+  assert.equal(r.chk.ok, true, JSON.stringify(r.chk));
+  assert.ok(Math.abs(r.chk.mean_diff) < 20, `裁完后应基本为 0，实际 ${r.chk.mean_diff}`);
+});
+
+check('Z9 导出谱 Background 对模型：用全谱背景判失败（−866），用窗口背景判通过', () => {
+  if (!niAvail) {
+    process.stdout.write('  skip 缺少 ni2p_cc.dat\n');
+    return;
+  }
+  const r = JSON.parse(runPy(`
+import json, os, sys, tempfile
+sys.path.insert(0, 'server')
+try:
+    import xps_fit as F
+    import xpspeak_mcp as M
+    d = tempfile.mkdtemp()
+    E, raw, _b, _n = F.load(os.environ['XPS_NI_PATH'], bg_col=0)
+    full = F.shirley_bg(E, raw)
+    idx = [i for i, v in enumerate(E) if 845.68 <= v <= 866.9]
+    Ew = [E[i] for i in idx]
+    rw = [raw[i] for i in idx]
+    wb = F.shirley_bg(Ew, rw)
+    wmap = {i: wb[j] for j, i in enumerate(idx)}
+    def write(name, pick):
+        p = os.path.join(d, name)
+        with open(p, 'w', encoding='utf-8', newline=chr(10)) as fh:
+            fh.write('B.E.' + chr(9) + 'Raw Intensity' + chr(9) + 'Peak Sum' + chr(9) + 'Background' + chr(10))
+            for i, e in enumerate(E):
+                fh.write('%.4f%s%.4f%s%.4f%s%.4f%s' % (e, chr(9), raw[i], chr(9), raw[i], chr(9), pick(i), chr(10)))
+        return p
+    bad = write('bad.dat', lambda i: full[i])
+    good = write('good.dat', lambda i: wmap.get(i, full[i]))
+    cropped = os.path.join(d, 'model.dat')
+    M.crop_to_window(os.environ['XPS_NI_PATH'], [845.68, 866.9], cropped)
+    out = {'bad': M.bg_consistency(bad, cropped, [845.68, 866.9]),
+           'good': M.bg_consistency(good, cropped, [845.68, 866.9])}
+except Exception as e:
+    out = {'error': type(e).__name__ + ': ' + str(e)}
+print(json.dumps(out))`));
+  assert.equal(r.error, undefined, r.error);
+  assert.equal(r.bad.ok, false, JSON.stringify(r.bad));
+  assert.ok(r.bad.mean_diff < -500, `全谱背景应低约 866 cps，实际 ${r.bad.mean_diff}`);
+  assert.equal(r.good.ok, true, JSON.stringify(r.good));
+  assert.ok(Math.abs(r.good.mean_diff) < 5, `窗口背景应吻合，实际 ${r.good.mean_diff}`);
+});
+
+check('Z10 不一致且 crop=false → 拒绝（写明 cps 与修法）；crop=true 才裁谱', () => {
+  if (!niAvail) {
+    process.stdout.write('  skip 缺少 ni2p_cc.dat\n');
+    return;
+  }
+  const r = JSON.parse(runPy(`
+import json, os, sys, tempfile
+sys.path.insert(0, 'server')
+try:
+    import xpspeak_mcp as M
+    out_xps = os.path.join(tempfile.mkdtemp(), 'x.xps')
+    try:
+        M.bg_plan(os.environ['XPS_NI_PATH'], [845.68, 866.9], out_xps, crop=False)
+        refused = None
+    except ValueError as e:
+        refused = str(e)
+    plan = M.bg_plan(os.environ['XPS_NI_PATH'], [845.68, 866.9], out_xps, crop=True)
+    out = {'refused': refused, 'crop': plan['crop'], 'used': os.path.basename(plan['used'])}
+except Exception as e:
+    out = {'error': type(e).__name__ + ': ' + str(e)}
+print(json.dumps(out))`));
+  assert.equal(r.error, undefined, r.error);
+  assert.ok(r.refused, 'crop=false 时不一致必须抛错，不能静默建区');
+  assert.match(r.refused, /cps/, '错误必须写差多少 cps');
+  assert.match(r.refused, /裁/, '错误必须给出「先裁谱」的修法');
+  assert.equal(r.crop.kept, 213, JSON.stringify(r.crop));
+  const src = readFileSync(join(REPO, 'server', 'xpspeak_mcp.py'), 'utf8');
+  assert.ok(src.indexOf('plan = bg_plan(') > 0, 'do_build 必须走 bg_plan');
+  assert.ok(src.indexOf('plan = bg_plan(') < src.indexOf('r = D.build('), 'bg_plan 必须在 D.build 之前');
+  assert.ok(src.indexOf('cons = bg_consistency(') > src.indexOf('r = D.build('), '建区后必须回读导出谱背景');
+});
+
 check('⑫ 未优化参数（初值=终值且不在界上）→ preflight 阻断；真拟合不会误报', () => {
   const out = runPy(`
 import json, math, sys

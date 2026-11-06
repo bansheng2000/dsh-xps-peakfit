@@ -1297,7 +1297,7 @@ print(json.dumps({'eta_list': res['eta_list'], 'eta': res['eta'],
   assert.deepEqual(r.eta, [0.48, 1.0], 'res.eta 在逐峰时也应是序列（report 要逐峰显示）');
 });
 
-check('⑩ 背景不一致 → build_guard 拒绝；tougaard 按 file 只警告不拦', () => {
+check('⑩ 背景不一致 → build_guard 拒绝；file 必须配 file（不再有 tougaard 特例）', () => {
   const out = runPy(`
 import json, math, sys
 sys.path.insert(0, 'server')
@@ -1309,21 +1309,23 @@ try:
     build_guard(peaks, 'linear', 'file', None, None)
 except ValueError as e:
     bad = '背景不一致' in str(e)
-tg = build_guard(peaks, 'tougaard', 'file', None, None)
+same = build_guard(peaks, 'file', 'file', None, None)
 E = [880 - 0.05 * i for i in range(600)]
 raw = [F.model_at(e, [856.7, 1.177, 30000.0], 1, 0.0, 0.0, 0.3) + 10.0 for e in E]
 res = F.fit(E, raw, [10.0] * len(E), [856.5], ds=0.0, ratio=0.0, eta=0.3, wlo=0.6, whi=4.0, ctol=1.0)
-pf = F.preflight(res, bg_used='file', expect_bg='tougaard')
+pf = F.preflight(res, bg_used='shirley', expect_bg='file')
 ok_same = F.preflight(res, bg_used='linear', expect_bg='linear')['ok']
-print(json.dumps({'bad': bad, 'tougaard_ok': tg, 'tougaard_warn': pf['warnings'],
-                  'tougaard_ok_preflight': pf['ok'], 'same_bg_ok': ok_same}))
+print(json.dumps({'bad': bad, 'same': same, 'file_warn': pf['warnings'],
+                  'file_errors': pf['errors'],
+                  'file_ok_preflight': pf['ok'], 'same_bg_ok': ok_same}, ensure_ascii=False))
 `);
   const r = JSON.parse(out);
   assert.equal(r.bad, true, 'linear 模板 + file 背景必须拒绝');
-  assert.equal(r.tougaard_ok, true, 'tougaard 按 file 处理：允许保存');
-  assert.equal(r.tougaard_ok_preflight, true, 'tougaard 不阻断');
+  assert.equal(r.same, true, 'file↔file 必须放行');
+  assert.equal(r.file_ok_preflight, false, 'file 模板 + 实际 shirley 必须阻断');
   assert.equal(r.same_bg_ok, true, '背景一致时不许乱拦');
-  assert.ok(r.tougaard_warn.some((w) => w.includes('tougaard')), '但必须给警告');
+  const msg = (r.file_errors || []).concat(r.file_warn || []).join('\n');
+  assert.match(msg, /file/, '必须点名 file 不一致');
 });
 
 check('⑪ 峰心距谱端 < 3×FWHM → 边界截断警告（远离的不报）', () => {
@@ -1643,10 +1645,129 @@ check('③ linear 模板 + 文件里是 Shirley 背景 → fail 且点名「背�
   assert.match(c.detail, /背景类型/);
 });
 
-check('④ tougaard 模板 → skip，reason 写明「不支持」', () => {
-  const c = bgCheck('shirley.dat', 'tougaard');
+check('④ file 模板（背景取自谱图）→ skip，reason 写明「不做模型重算」', () => {
+  const c = bgCheck('shirley.dat', 'file');
   assert.equal(c.status, 'skip', c.detail);
-  assert.match(c.detail, /不支持/);
+  assert.match(c.detail, /不做模型重算|谱图自带/);
+});
+
+/* ───────── 14. 背景类型改名（tougaard → file）与 build 按模板选类型 ───────── */
+
+process.stdout.write('\n[14] 背景类型 file / build 按模板选背景 / 建区背景回读\n');
+
+check('A① 老模板 background=tougaard 读出归一成 file，note 保留原文', () => {
+  const legacyRoot = join(tmp, 'legacy-root');
+  mkdirSync(join(legacyRoot, 'templates', 'tlegacy'), { recursive: true });
+  writeFileSync(join(legacyRoot, 'templates', 'tlegacy', 'meta.json'), JSON.stringify({
+    id: 'tlegacy', name: '老模板', element: 'Ni', orbital: '2p', background: 'tougaard',
+    note: '这是旧说明', peak_windows: [{ label: 'Ni 2p3/2', center_ev: 856.0 }],
+  }), 'utf8');
+  const t = listTemplates(legacyRoot)[0];
+  assert.equal(t.background, 'file', 'tougaard 必须归一成 file');
+  assert.match(t.note, /原 background=tougaard/, 'note 必须保留原文，不许静默改写历史');
+  assert.match(t.note, /这是旧说明/, '原有 note 不能丢');
+});
+
+check('A② validateTemplate 拒收 tougaard（声明了却兑现不了的类型不再进库）', () => {
+  const r = validateTemplate({ ...GOOD, background: 'tougaard' });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => /background 只能是/.test(e)), JSON.stringify(r.errors));
+});
+
+check('A③ use 对 file 背景给明确提示：用谱自带 Background 列，无背景列就用不了', () => {
+  const t = { ...GOOD, background: 'file', fit_window_ev: null };
+  const r = useInstruction(t, 'exec', null);
+  assert.equal(r.ok, true);
+  assert.equal(r.instruction.fields.background, 'file');
+  const notes = r.instruction.notes.join('\n');
+  assert.match(notes, /file/);
+  assert.match(notes, /Background 列/);
+  assert.match(notes, /没有背景列/);
+});
+
+check('A④ build_guard：file↔file 放行；file↔shirley 拒绝（不再有 tougaard 特例）', () => {
+  const out = runPy(`
+import json, sys
+sys.path.insert(0, 'server')
+from xpspeak_mcp import build_guard
+ok = build_guard([{'pos': 856.0, 'fwhm': 1.8}], 'file', 'file', 1.0, 3.0)
+bad = ''
+try:
+    build_guard([{'pos': 856.0, 'fwhm': 1.8}], 'file', 'shirley', 1.0, 3.0)
+except ValueError as e:
+    bad = str(e)
+print(json.dumps({'ok': ok, 'bad': bad}, ensure_ascii=False))
+`);
+  const r = JSON.parse(out);
+  assert.equal(r.ok, true, 'file↔file 必须放行');
+  assert.match(r.bad, /背景不一致/, 'file 模板配 shirley 实际背景必须拒绝');
+});
+
+check('B① expect_bg=linear → 真的在 Background 对话框选 Linear（bg_type 传下去，不是一律 Shirley）', () => {
+  const out = runPy(`
+import json, os, sys, tempfile
+sys.path.insert(0, 'server')
+import xps_fit as F
+import xpspeak_mcp as M
+d = tempfile.mkdtemp()
+src = os.path.join(d, 'src.dat')
+E = [880 - 0.1 * i for i in range(201)]
+raw = [F.model_at(e, [870.0, 1.5, 20000.0], 1, 0.0, 0.0, 0.3) + 800 + (880 - e) * 20 for e in E]
+with open(src, 'w', encoding='ascii', newline=chr(10)) as fh:
+    for i, e in enumerate(E):
+        fh.write('%.4f %.6f' % (e, raw[i]) + chr(10))
+out_xps = os.path.join(d, 'b.xps')
+spec = os.path.join(d, 'b.dat')
+cap = {}
+def fake(exe, s, peaks, out, spec2=None, par=None, background=None, bg_type=None):
+    cap['background'], cap['bg_type'] = background, bg_type
+    open(out, 'wb').write(b'x')
+    n = len(E)
+    line = [raw[0] + (raw[-1] - raw[0]) * i / (n - 1.0) for i in range(n)]
+    with open(spec2, 'w', encoding='utf-8', newline=chr(10)) as fh:
+        fh.write('B.E.\\tRaw Intensity\\tPeak Sum\\tBackground' + chr(10))
+        for i, e in enumerate(E):
+            fh.write('%.4f\\t%.4f\\t%.4f\\t%.4f' % (e, raw[i], raw[i] - line[i], line[i]) + chr(10))
+    return {'xps': out, 'xps_bytes': 1, 'peaks': [{'pos': p['pos'], 'fwhm': p['fwhm'], 'area': p['area']} for p in peaks]}
+M.D.build = fake
+M.do_build({'path': src, 'peaks': [{'pos': 870.0, 'fwhm': 1.5, 'area': 20000.0, 'gl': 30}],
+            'out': out_xps, 'spec': spec, 'expect_bg': 'linear', 'wlo': 1.0, 'whi': 3.0})
+print(json.dumps(cap, ensure_ascii=False))
+`);
+  const r = JSON.parse(out);
+  assert.equal(r.background, true, 'linear 模板必须打开 Background 对话框');
+  assert.equal(r.bg_type, 'linear', '必须按模板选 Linear，不能一律 Shirley');
+});
+
+check('B② expect_bg=file + ASCII 源谱 → 在 D.build 之前拒绝（ASCII 没有背景列）', () => {
+  const out = runPy(`
+import json, os, sys, tempfile
+sys.path.insert(0, 'server')
+import xps_fit as F
+import xpspeak_mcp as M
+d = tempfile.mkdtemp()
+src = os.path.join(d, 'src.dat')
+E = [880 - 0.1 * i for i in range(201)]
+with open(src, 'w', encoding='ascii', newline=chr(10)) as fh:
+    for e in E:
+        fh.write('%.4f %.6f' % (e, 800 + (880 - e) * 20) + chr(10))
+called = {'build': False}
+def fake(*a, **k):
+    called['build'] = True
+    return {}
+M.D.build = fake
+out_xps = os.path.join(d, 'b.xps')
+msg = ''
+try:
+    M.do_build({'path': src, 'peaks': [{'pos': 870.0, 'fwhm': 1.5, 'area': 20000.0, 'gl': 30}],
+                'out': out_xps, 'expect_bg': 'file'})
+except ValueError as e:
+    msg = str(e)
+print(json.dumps({'msg': msg, 'built': called['build'], 'exists': os.path.exists(out_xps)}, ensure_ascii=False))
+`);
+  const r = JSON.parse(out);
+  assert.match(r.msg, /ASCII/, '必须在建区前说明源谱没有背景列');
+  assert.equal(r.built, false, '不许先建出来再靠 audit 兜');
 });
 
 /* ───────── 结果 ───────── */

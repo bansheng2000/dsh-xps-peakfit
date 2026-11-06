@@ -12,7 +12,7 @@
 
 注意: 本进程只许往 stdout 写协议行，工具里的任何 print 都重定向到 stderr。
 """
-import contextlib, ctypes, ctypes.wintypes, json, os, re, sys, time
+import contextlib, ctypes, ctypes.wintypes, json, os, re, sys, tempfile, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import xpspeak_drive as D
@@ -438,13 +438,12 @@ def build_guard(peaks, expect_bg=None, actual_bg=None, wlo=None, whi=None):
 
     两条：
       1. 背景不一致：`background` 字段只影响拟合，不改变保存文件里的背景，两者对不上时
-         结论与图不是同一件事（tougaard 不在 xps_fit 支持内，按 file 处理并允许）。
+         结论与图不是同一件事。file 与 shirley/linear 是三种不同的兑现方式，互不放行。
       2. 撞界：峰 FWHM 正好顶在 wlo/whi 上时，这个值是约束决定的、不是拟合出来的。
     """
     if expect_bg and actual_bg and expect_bg != actual_bg:
-        if not (expect_bg == "tougaard" and actual_bg == "file"):
-            raise ValueError("⛔ 背景不一致：模板要求 %s，实际用的是 %s —— background 字段只管拟合，"
-                             "不改变保存文件里的背景。先在软件里按模板扣好背景再重跑。" % (expect_bg, actual_bg))
+        raise ValueError("⛔ 背景不一致：模板要求 %s，实际用的是 %s —— background 字段只管拟合，"
+                         "不改变保存文件里的背景。先在软件里按模板扣好背景再重跑。" % (expect_bg, actual_bg))
     for i, pk in enumerate(peaks):
         fw = float(pk["fwhm"])
         for lim, name in ((wlo, "wlo"), (whi, "whi")):
@@ -551,7 +550,7 @@ def crop_to_window(path, window, dest):
             "range_ev": [E[idx[-1]], E[idx[0]]], "window": [lo, hi]}
 
 
-def bg_consistency(export_spec, model_spectrum, window):
+def bg_consistency(export_spec, model_spectrum, window, background="shirley"):
     """回读导出谱的 Background 列，与建区所用谱的窗口 Shirley 在拟合区内逐点比。
 
     这是落盘后的第二道：XPSPeak 到底把哪条背景写进文件，只能从导出列看出来。
@@ -566,7 +565,13 @@ def bg_consistency(export_spec, model_spectrum, window):
     for i, v in enumerate(Ee):
         if lo - 1e-9 <= v <= hi + 1e-9:
             got[round(v, 3)] = bge[i]
-    model = F.shirley_bg(Em, rawm)
+    if background == "linear":
+        # linear 的模型就是两端点连线（XPSPeak 的 Linear 背景也是这条弦）
+        e0, e1 = Em[idx[0]], Em[idx[-1]]
+        r0, r1 = rawm[idx[0]], rawm[idx[-1]]
+        model = [r0 + (r1 - r0) * (Em[i] - e0) / (e1 - e0) for i in range(len(Em))]
+    else:
+        model = F.shirley_bg(Em, rawm)
     diffs = []
     for i in idx:
         v = got.get(round(Em[i], 3))
@@ -595,7 +600,8 @@ def bg_plan(path, window, out_xps, crop=True):
             "（= 峰高 %.1f%%，容差 %.2f%%）。XPSPeak 建区按整条谱算背景，Peak Sum 会系统性偏低。"
             "修法：把 window 传进来由我裁谱重建（默认 crop=true），或先把谱裁到拟合窗口再 build。"
             % (chk["mean_diff"], 100.0 * chk["pct_of_height"], 100.0 * BG_SCOPE_TOL))
-    dest = os.path.splitext(out_xps)[0] + "_fitwin.dat"
+    # 临时谱不落交付目录：和产出的 .xps 混在一起，交付时容易被当成产物。
+    dest = os.path.join(tempfile.gettempdir(), "xpspeak_fitwin_%d.dat" % abs(hash(os.path.normpath(out_xps))))
     info = crop_to_window(path, window, dest)
     chk2 = bg_scope_check(info["used"], window)
     if not chk2["ok"]:
@@ -614,7 +620,21 @@ def do_build(a):
         raise ValueError("peaks 不能为空")
     out = os.path.normpath(a.get("out") or D.work_path("built.xps"))
 
-    build_guard(peaks, a.get("expect_bg"), a.get("actual_bg"), a.get("wlo"), a.get("whi"))
+    # 背景类型必须兑现：模板写 shirley/linear 就在 Background 对话框里选那一项（实测选
+    # Linear 后导出谱背景对两端直线 0.0%、选 Shirley 对重算 Shirley 0.09%，选 Tougaard
+    # 是第三种曲线）；写 file 就不点 Background，直接沿用源谱自带的背景列。
+    # 以前无论模板写什么都按软件默认（Shirley）建区，linear 模板根本造不出 linear 的图。
+    expect = a.get("expect_bg")
+    if expect not in (None, "shirley", "linear", "file", "none"):
+        raise ValueError("expect_bg 只能是 shirley/linear/file/none，收到 %r" % expect)
+    src_path = a["path"]
+    if expect == "file" and os.path.splitext(src_path)[1].lower() not in (".xps", ".rpa"):
+        raise ValueError("⛔ 模板背景是 file（背景取自谱图自带的 Background 列），但源谱是 ASCII（没有背景列）："
+                         "这个模板只能配 .xps/.rpa 源谱。请换带背景列的导出谱，或把模板背景改成 shirley/linear。")
+    if expect == "none":
+        expect = None
+    actual = a.get("actual_bg") or ("file" if expect == "file" else expect)
+    build_guard(peaks, expect, actual, a.get("wlo"), a.get("whi"))
     spec = os.path.normpath(a["spec"]) if a.get("spec") else None
     par = os.path.normpath(a["par"]) if a.get("par") else None
     win = a.get("window")
@@ -625,14 +645,20 @@ def do_build(a):
         used = plan["used"]
     verify = spec
     tmp_verify = None
-    if plan is not None and not verify:
-        tmp_verify = os.path.splitext(out)[0] + "_bgcheck.dat"
+    if not verify and (plan is not None or expect in ("shirley", "linear")):
+        tmp_verify = os.path.join(tempfile.gettempdir(), "xpspeak_bgcheck_%d.dat" % abs(hash(out)))
         verify = tmp_verify
     edge = _edge_warnings(used, peaks)
-    r = D.build(EXE, used, peaks, out, verify, par, a.get("bg"))
+    bg_flag = a.get("bg")
+    bg_type = a.get("bg_type")
+    if expect in ("shirley", "linear"):
+        bg_flag, bg_type = True, expect
+    elif expect == "file":
+        bg_flag, bg_type = False, None
+    r = D.build(EXE, used, peaks, out, verify, par, bg_flag, bg_type)
     txt = "已生成 %s（%d 字节）" % (r["xps"], r["xps_bytes"])
-    if plan is not None:
-        cons = bg_consistency(verify, used, win)
+    if win and (expect in ("shirley", "linear") or plan is not None):
+        cons = bg_consistency(verify, used, win, "linear" if expect == "linear" else "shirley")
         if not cons.get("ok"):
             try:
                 os.remove(out)
@@ -660,6 +686,11 @@ def do_build(a):
                 os.remove(tmp_verify)
             except OSError:
                 pass
+    elif tmp_verify:
+        try:
+            os.remove(tmp_verify)
+        except OSError:
+            pass
     bg_ok = None
     if spec and a.get("expect_bg") == "linear":
         try:
@@ -755,7 +786,7 @@ TOOLS = [
       "ds": {"type": "number", "description": "自旋轨道劈裂 ΔBE（eV）：S 2p=1.18，其他元素按文献值，默认 1.18"},
       "ratio": {"type": "number", "description": "伴线/主峰面积比，2p=0.5，d 轨道=2/3，默认 0.5"},
       "eta": {"type": ["number", "array", "string"], "description": "%Lorentzian（0-1）：一个数=全部峰同值；数组或逗号串（如 0.48,1.0,1.0）=逐峰。实测谱常是主峰 0.4–0.5、卫星 1.0，别用标量糊过去"},
-      "expect_bg": {"type": "string", "enum": ["shirley", "linear", "tougaard", "file", "none"], "description": "模板要求的背景；给了就与实际 bg 比对，不一致判失败（tougaard 按 file 处理并警告）"},
+      "expect_bg": {"type": "string", "enum": ["shirley", "linear", "file", "none"], "description": "模板要求的背景；给了就与实际 bg 比对，不一致判失败。file = 用谱图自带的 Background 列"},
       "ctol": {"type": "number", "description": "峰位初值允许移动的半宽 eV，默认 1.0；两个初值间距 < 0.5×ctol 会被直接拒绝（不可分离）"},
       "wlo": {"type": "number", "description": "FWHM 下限 eV，默认 0.6；谱里有更窄的峰必须调小，否则 FWHM 被压平在 0.6 这个假值上"},
       "whi": {"type": "number", "description": "FWHM 上限 eV，默认 4.0"},
@@ -777,8 +808,8 @@ TOOLS = [
       "spec": dict(S, description="可选：同时导出谱图 ASCII 到这个路径（用于复核面积）"),
       "par": dict(S, description="可选：同时导出峰参数表到这个路径"),
       "bg": {"type": "boolean", "description": "是否先扣背景建区域；ASCII 源默认 true，.xps 源默认 false"},
-      "expect_bg": {"type": "string", "enum": ["shirley", "linear", "tougaard", "file", "none"], "description": "模板要求的背景类型；与 actual_bg 不一致拒绝保存"},
-      "actual_bg": {"type": "string", "enum": ["shirley", "linear", "tougaard", "file", "none"], "description": "这一次实际用的背景类型；与 expect_bg 不一致拒绝保存"},
+      "expect_bg": {"type": "string", "enum": ["shirley", "linear", "file", "none"], "description": "模板要求的背景类型：shirley/linear 会在 Background 对话框里按类型选（不是一律 Shirley）；file = 不点 Background，用谱自带的 Background 列（只接受 .xps 源谱）。与 actual_bg 不一致拒绝保存"},
+      "actual_bg": {"type": "string", "enum": ["shirley", "linear", "file", "none"], "description": "这一次实际用的背景类型；与 expect_bg 不一致拒绝保存"},
       "wlo": {"type": "number", "description": "拟合时用的 FWHM 下界；峰 FWHM 顶在该值上即判撞界、拒绝保存"},
       "whi": {"type": "number", "description": "拟合时用的 FWHM 上界；同上"},
       "window": {"type": "array", "items": {"type": "number"},

@@ -1,5 +1,16 @@
 # 变更记录
 
+## 未发版修订（第十批 A+B：背景类型只认 shirley/linear/file，build 按模板选背景）
+
+版本仍 `2.8.0`。
+
+- **移除 `tougaard` 这个空壳类型**：`lib/routes.js` 的 `BACKGROUNDS` 改为 `shirley / linear / file`；`file` 的语义写死为「背景取自目标谱自带的 Background 列，插件不做模型假设」。XPSPeak 的类型下拉虽然有 Tougaard，但插件无法保证兑现，声明了却做不到比不支持更误导。
+- **老模板不静默改写历史**：`listTemplates()` 与上传路径读到 `background: 'tougaard'` 时归一成 `file`，返回 `legacy_background: 'tougaard'` 并在 `note` 追加原文「原 background=tougaard，插件无法设置该类型，已按 file 处理…」；`validateTemplate` 直接拒收 `tougaard`。
+- **清掉五处 tougaard 特例**：`bgAt()` 的 `t**2` 分支、`mcpBackground()` 兜底、`useInstruction` 的 `bg=file` 警告、`build_guard` 的 `tougaard↔file` 放行、`audit` `bg-shape` 的 skip 文案、UI 展示（改为 `file（谱自带）`）。规则统一成一句：`file` = 用谱自带背景。
+- **`xpspeak_build` 按模板选背景类型**：`server/xpspeak_drive.py` 新增 `set_combo()`（`CB_SETCURSEL` + `WM_COMMAND(CBN_SELCHANGE)`），在 Background 对话框的 `ComboBox id=13` 上选 `Shirley/Linear/Tougaard`；`do_build` 传 `bg_type = expect_bg`（`shirley`/`linear`），`file` 不点 Background。真谱实测：`Linear` 产出的背景对两端直线偏离 **0.0%**、默认是 Shirley（7.19%）；此前「选择无效」的结论来自两峰合成谱（背景本来接近直线），不成立。
+- **`file` 只配 `.xps`/`.rpa`**：ASCII 源谱没有背景列，`do_build` 在 `D.build` **之前** 直接拒绝，不许先建出来再靠 audit 兜。
+- 自检 109 → 116（A① 老模板归一 + note 原文；A② 拒收 tougaard；A③ `file` 提示；A④ `file↔file` 放行、`file↔shirley` 拒绝；B① `bg_type=linear` 真传下去；B② `file`+ASCII 在建区前拒绝）；旧 HEAD 红 6 条，两处变异（关归一、`bg_type` 写回 None）各真红 1 条。
+
 ## 未发版修订（第九批：bg-shape 扩到 Shirley 与类型识别）
 
 版本仍 `2.8.0`。

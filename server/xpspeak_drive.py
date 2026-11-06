@@ -30,6 +30,10 @@ DLG_SAVE_RPA = "Save region parameters"
 # 坑：Processing 窗的 "Save XPS" 按钮弹出的保存框标题仍是 "Open file"（VB6 CommonDialog 的 caption 没改），
 # 所以保存 .xps 复用的就是 DLG_OPEN 这个匹配串；Parameters > Save Region Parameters 的框标题是 DLG_SAVE_RPA。
 BM_CLICK, WM_SETTEXT, WM_COMMAND, WM_KEYDOWN = 0x00F5, 0x000C, 0x0111, 0x0100
+CB_GETCOUNT, CB_GETCURSEL, CB_SETCURSEL, CB_GETLBTEXT = 0x0146, 0x0147, 0x014E, 0x0148
+CBN_SELCHANGE = 1
+# Background（标题 "Region"）对话框里的背景类型下拉：Items = Shirley / Linear / Tougaard。
+BG_DLG_TITLE, BG_TYPE_COMBO_ID = "Region", 13
 MF_BYPOSITION, IDOK = 0x400, 1
 u.GetWindowTextW.argtypes = [w.HWND, w.LPWSTR, ctypes.c_int]
 u.GetClassNameW.argtypes = [w.HWND, w.LPWSTR, ctypes.c_int]
@@ -239,7 +243,8 @@ def wait_new(pid, before, timeout=10.0):
     t0 = time.time()
     while time.time() - t0 < timeout:
         for h in tops(pid):
-            if u.IsWindowVisible(h) and h not in before:
+            # 只认 VB6 窗体：ComboLBox 之类的弹出列表也会「新可见」，抢到它就会找不到控件
+            if u.IsWindowVisible(h) and h not in before and cls(h) == "ThunderRT6FormDC":
                 return h
         time.sleep(0.2)
     return None
@@ -252,6 +257,45 @@ def _fill(hwnd, pairs):
             raise KeyError("对话框 %r 没有控件 id=%s" % (text(hwnd), cid))
         _set_window_text(c, val)
         time.sleep(0.15)
+
+
+def combo(hwnd, cid):
+    for c in kids(hwnd):
+        if u.GetDlgCtrlID(c) == cid and cls(c) == "ThunderRT6ComboBox":
+            return c
+    return None
+
+
+def combo_items(c):
+    n = u.SendMessageW(c, CB_GETCOUNT, 0, 0)
+    out = []
+    for i in range(n):
+        buf = ctypes.create_unicode_buffer(128)
+        u.SendMessageW(c, CB_GETLBTEXT, i, ctypes.byref(buf))
+        out.append(buf.value)
+    return out
+
+
+def set_combo(hwnd, cid, label, settle=0.8):
+    """按文字选中下拉项，并给父窗体发 CBN_SELCHANGE。
+
+    VB6 的 Change/Click 事件不会因为 CB_SETCURSEL 自己触发，必须补一条 WM_COMMAND
+    （HIWORD = CBN_SELCHANGE，LOWORD = 控件 id）——只设选中值，软件内部仍按旧类型算背景。
+    返回实际选中的序号；控件/条目不存在时抛 KeyError（不静默用默认值）。
+    """
+    c = combo(hwnd, cid)
+    if c is None:
+        raise KeyError("对话框 %r 没有下拉框 id=%s" % (text(hwnd), cid))
+    items = combo_items(c)
+    want = label.strip().lower()
+    idx = next((i for i, s in enumerate(items) if s.strip().lower() == want), None)
+    if idx is None:
+        raise KeyError("下拉框没有 %r（有：%s）" % (label, " / ".join(items)))
+    u.SendMessageW(c, CB_SETCURSEL, idx, 0)
+    u.PostMessageW(hwnd, WM_COMMAND, (CBN_SELCHANGE << 16) | cid, c)
+    time.sleep(settle)
+    got = u.SendMessageW(c, CB_GETCURSEL, 0, 0)
+    return {"index": idx, "items": items, "selected": got}
 
 
 def launch(exe=EXE_DEFAULT):
@@ -336,15 +380,21 @@ if __name__ == "__main__":
         raise SystemExit(__doc__)
 
 
-def build(exe, src, peaks, out_xps, out_spec=None, out_par=None, background=None):
+def build(exe, src, peaks, out_xps, out_spec=None, out_par=None, background=None, bg_type=None):
     """一次调用：载谱 -> (扣背景) -> 逐个 Add Peak -> 导出谱图/参数 -> 存 .xps。
 
     peaks: [{"pos": 162.059, "fwhm": 0.952, "area": 53963.0, "gl": 30}, ...]
     关键实测：Add Peak 对话框里的 Area 会被真正采用（存出来的曲线面积与之一致）；
     而用 .rpa 载入参数时首峰 Area 被软件按 height 反算忽略 —— 所以生成 .xps 必须走这条路。
     background=None 时：ASCII 谱自动扣背景（需要它来建 Region），.xps 谱默认不动。
+    bg_type：background=True 时在下拉里选 Shirley / Linear / Tougaard —— 不选就是软件默认
+    （实测默认 Shirley，模板写 linear 也只能造出台阶背景，所以必须显式选）。
     """
     src, out_xps = os.path.normpath(src), os.path.normpath(out_xps)
+    if bg_type is not None:
+        bg_type = str(bg_type).strip().lower()
+        if bg_type not in ("shirley", "linear", "tougaard"):
+            raise ValueError("bg_type 只能是 shirley/linear/tougaard，收到 %r" % bg_type)
     if not os.path.exists(src):
         raise FileNotFoundError(src)
     ascii_src = not src.lower().endswith((".xps", ".rpa"))
@@ -354,6 +404,7 @@ def build(exe, src, peaks, out_xps, out_spec=None, out_par=None, background=None
     for f in (out_xps, out_spec, out_par):
         if f and os.path.exists(f):
             os.remove(f)
+    type_info = None
     p = launch(exe)
     try:
         pid = p.pid
@@ -368,12 +419,17 @@ def build(exe, src, peaks, out_xps, out_spec=None, out_par=None, background=None
         time.sleep(1.5)
         _kill_strays(pid)
         fit = menu_form(pid)
+        type_info = None
         if background:
             before = _vis(pid)
             menu_click(fit, "Background", None, settle=1.5)
             dlg = wait_new(pid, before)
             if dlg is None:
                 raise TimeoutError("Background 对话框没出现")
+            if bg_type is not None:
+                type_info = set_combo(dlg, BG_TYPE_COMBO_ID,
+                                      {"shirley": "Shirley", "linear": "Linear",
+                                       "tougaard": "Tougaard"}[bg_type])
             click(button(dlg, "Accept"), settle=2.5)
         for pk in peaks:
             before = _vis(pid)
@@ -406,5 +462,6 @@ def build(exe, src, peaks, out_xps, out_spec=None, out_par=None, background=None
             raise RuntimeError("%s 没写出: %s" % (name, f))
     return {"xps": out_xps, "xps_bytes": os.path.getsize(out_xps),
             "spectrum": out_spec, "params": out_par,
+            "bg_type": bg_type, "bg_type_select": type_info,
             "peaks": [{"pos": float(k["pos"]), "fwhm": float(k["fwhm"]),
                        "area": float(k["area"]), "gl": int(k.get("gl", 30))} for k in peaks]}

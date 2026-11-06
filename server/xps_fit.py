@@ -432,9 +432,7 @@ def preflight(res, E=None, bg_used=None, expect_bg=None, edge_ratio=3.0, bg_col=
                       % (len(b), "；".join(lines)))
 
     if expect_bg and bg_used and expect_bg != bg_used:
-        if expect_bg == "tougaard" and bg_used == "file":
-            warnings.append("模板背景是 tougaard，xps_fit 没有这一项，实际按 file（谱图自带背景）处理 —— 报告里必须写明。")
-        else:
+        if True:
             errors.append("背景不一致：模板要求 %s，实际用了 %s。`background` 字段只管拟合，不改变保存文件里的背景。"
                           % (expect_bg, bg_used))
 

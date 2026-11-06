@@ -369,7 +369,8 @@ check('⑦ 缺 eta 的模板 use 带非空 warnings；写了 eta 的不给警告
   assert.equal(r1.ok, true, '缺 eta 不是错误，不能拦');
   assert.ok(Array.isArray(r1.instruction.warnings) && r1.instruction.warnings.length > 0, '缺 eta 必须给非空 warnings');
   const r2 = useInstruction({ ...GOOD, eta: 0.45 }, 'exec');
-  assert.ok(Array.isArray(r2.instruction.warnings) && r2.instruction.warnings.length === 0, '写了 eta 就不该有 warnings');
+  // 第五批起 warnings 里可能还有「老模板无 fit_window_ev」这类提示，只要求不再有 eta 相关的警告
+  assert.deepEqual(r2.instruction.warnings.filter((w) => /eta/i.test(w)), [], '写了 eta 就不该再提示 eta');
 });
 
 check('④ observed 只作对照，绝不进 fit 参数（面积比不固定是用户决定）', () => {
@@ -432,41 +433,59 @@ check('W3 schema：peak_windows[].eta 与 applicable_window_ev 的范围校验',
   ]) assert.equal(validateTemplate(bad).ok, false, JSON.stringify(bad));
 });
 
-check('W4 窗口适用性：17.5 拒绝（message 带两个宽度）；39.8/36.0 放行+警告；35.99 判死；36.01 放行；读不到只警告', () => {
-  const t = { ...GOOD, applicable_window_ev: 40 };
+check('W4 拟合区闸：17.5 拒绝；39.8/36.0 取交集放行；35.99 判死；36.01 放行；无交集拒绝；老模板只警告', () => {
+  const t = {
+    ...GOOD,
+    fit_window_ev: { lo: 844.1, hi: 884.1 },
+    applicable_window_ev: 40,
+    peak_windows: [{ label: 'Ni 2p3/2', center_ev: 864, eta: 0.5 }],
+  };
   const narrow = useInstruction(t, 'exec', { lo: 844.1, hi: 861.6 }); // 17.5 eV
-  assert.equal(narrow.ok, false, '窗口不够必须拒绝');
+  assert.equal(narrow.ok, false, '拟合区覆盖不够必须拒绝');
   assert.equal(narrow.code, 'window-too-narrow');
-  assert.match(narrow.message, /40 eV/, 'message 要写模板标定宽度');
+  assert.match(narrow.message, /844\.1–884\.1/, 'message 要写模板拟合区');
   assert.match(narrow.message, /17\.50 eV/, 'message 要写本次实际宽度');
   const near = useInstruction(t, 'exec', { lo: 844.1, hi: 883.9 }); // 39.8 eV
-  assert.equal(near.ok, true, '39.8 对 40 只差 0.2 eV，必须放行');
-  const w = near.instruction.warnings.join('\n');
-  assert.match(w, /39\.80 eV/, '放行时 warnings 要写实际宽度');
-  assert.match(w, /窄 0\.20 eV/, '放行时 warnings 要写窄了多少');
-  assert.match(w, /≥90%/, '容差口径要写明');
-  const exact = useInstruction(t, 'exec', { lo: 850, hi: 886 }); // 36.0 = 90%
+  assert.equal(near.ok, true, '39.8 对 40 只差 0.2 eV，必须放行（取交集）');
+  const nw = near.instruction.warnings.join('\n');
+  assert.match(nw, /交集/, '放行时要写 window 取了交集');
+  assert.match(nw, /883\.90/, '交集上界要写出来');
+  const exact = useInstruction(t, 'exec', { lo: 848.1, hi: 884.1 }); // 36.0 = 90%
   assert.equal(exact.ok, true, '恰好 90%（36.0）应放行（整数比较，不吃浮点误差）');
-  assert.match(exact.instruction.warnings.join('\n'), /36\.00 eV/, '放行也要写实际宽度');
-  assert.equal(useInstruction(t, 'exec', { lo: 850.1, hi: 886 }).ok, false, '35.9 判死');
-  assert.equal(useInstruction(t, 'exec', { lo: 850.01, hi: 886 }).ok, false, '35.99 判死');
-  assert.equal(useInstruction(t, 'exec', { lo: 849.99, hi: 886 }).ok, true, '36.01 放行');
-  assert.equal(useInstruction(t, 'exec', { lo: 830, hi: 875 }).ok, true, '45 比 40 宽，直接放行');
+  assert.equal(useInstruction(t, 'exec', { lo: 848.2, hi: 884.1 }).ok, false, '35.9 判死');
+  assert.equal(useInstruction(t, 'exec', { lo: 848.11, hi: 884.1 }).ok, false, '35.99 判死');
+  assert.equal(useInstruction(t, 'exec', { lo: 848.09, hi: 884.1 }).ok, true, '36.01 放行');
+  const wide = useInstruction(t, 'exec', { lo: 830, hi: 875 });
+  assert.equal(wide.ok, true, '45 比 40 宽，直接放行');
+  assert.deepEqual(wide.instruction.steps.find((x) => x.tool === 'xpspeak_fit').arguments.window, [844.1, 875]);
+  const disjoint = useInstruction(t, 'exec', { lo: 900, hi: 960 });
+  assert.equal(disjoint.ok, false, '谱与拟合区没有交集必须拒绝');
+  assert.equal(disjoint.code, 'window-outside-spectrum');
   const unknown = useInstruction(t, 'exec', null);
   assert.equal(unknown.ok, true, '拿不到谱就不能拦');
   assert.match(unknown.instruction.warnings.join('\n'), /未核对/);
-  assert.match(
-    useInstruction({ ...GOOD }, 'exec', { lo: 830, hi: 875 }).instruction.warnings.join('\n'),
-    /未标 applicable_window_ev/,
-    '老模板缺字段只警告，不拦',
-  );
+  const old = useInstruction({ ...GOOD }, 'exec', { lo: 830, hi: 875 });
+  assert.equal(old.ok, true, '老模板没有 fit_window_ev 不能拦');
+  assert.match(old.instruction.warnings.join('\n'), /未写 fit_window_ev/);
+  assert.equal(old.instruction.steps.find((x) => x.tool === 'xpspeak_fit').arguments.window, undefined, '老模板不传 window');
+  const shortData = useInstruction(t, 'exec', { lo: 850, hi: 875 }); // 25 eV，但拟合区 40
+  assert.equal(shortData.ok, false, '数据宽度不足拟合区 90% 必须拒绝');
+  // applicable_window_ev 只提示数据长度，不再当拟合窗口：数据 39.8 < 记录 40 只 warn
+  const hint = useInstruction({ ...t, applicable_window_ev: 40 }, 'exec', { lo: 844.1, hi: 883.9 });
+  assert.equal(hint.ok, true, 'applicable_window_ev 不再拦');
+  assert.match(hint.instruction.warnings.join('\n'), /只作提示/);
+  // applicable_window_ev（数据要够长）与 fit_window_ev（拟合区）分工：50 对 30 也只提示
+  const split = useInstruction({ ...t, fit_window_ev: { lo: 850, hi: 880 }, applicable_window_ev: 50 }, 'exec', { lo: 830, hi: 870 });
+  assert.equal(split.ok, true, '闸只看 fit_window_ev，applicable_window_ev 不参与判决');
+  assert.deepEqual(split.instruction.steps.find((x) => x.tool === 'xpspeak_fit').arguments.window, [850, 870]);
+  assert.match(split.instruction.warnings.join('\n'), /只作提示/);
 });
 
 const w5SpecNarrow = join(tmp, 'w5-narrow.txt');
 const w5SpecWide = join(tmp, 'w5-wide.txt');
 writeFileSync(w5SpecNarrow, '# BE  intensity\n844.4  100\n850  500\n861.9  120\n', 'utf8');
 writeFileSync(w5SpecWide, '830  10\n850  500\n875  20\n', 'utf8');
-const w5Created = createTemplate({ ...GOOD, applicable_window_ev: 40 }, root);
+const w5Created = createTemplate({ ...GOOD, applicable_window_ev: 40, fit_window_ev: { lo: 844.1, hi: 884.1 }, peak_windows: [{ label: 'Ni 2p3/2', center_ev: 864 }] }, root);
 const w5Srv = createServer(createRoutes({ root, env: { ...process.env, XPSPEAK_ROOT: root, XPSPEAK_MODE: '', XPSPEAK_MODE_FILE: '' } }));
 await new Promise((resolve) => w5Srv.listen(0, '127.0.0.1', resolve));
 const w5Port = w5Srv.address().port;
@@ -482,6 +501,11 @@ check('W5 HTTP：POST /templates/<id>/use 带谱图路径，窗口不足 → 422
   assert.match(w5Bad.json.message, /17\.5/, '拒绝理由要写实际窗口宽度');
   assert.equal(w5Good.status, 200, JSON.stringify(w5Good.json));
   assert.equal(w5Good.json.ok, true);
+  assert.deepEqual(
+    w5Good.json.instruction.steps.find((x) => x.tool === 'xpspeak_fit').arguments.window,
+    [844.1, 875],
+    '谱比拟合区窄时要按交集传 window',
+  );
 });
 
 /* ── 第三批：审计 / 荷电校正登记 / run.json ── */
@@ -492,7 +516,7 @@ const b3be = [];
 for (let i = 0; i < 200; i += 1) b3be.push(Number((880 - i * 0.1).toFixed(3)));
 const gauss = (x, c, fwhm, h) => h * Math.exp(-4 * Math.LN2 * ((x - c) / fwhm) ** 2);
 const b3bg = b3be.map((x) => 500 + (880 - x) * 10);
-const b3comp = b3be.map((x) => gauss(x, 862, 1.6, 20000) + gauss(x, 856, 2.0, 8000));
+const b3comp = b3be.map((x) => gauss(x, 870, 1.65, 20000) + gauss(x, 875, 1.05, 8000)); // 与峰表/模板窗口一致
 const b3fit = b3comp.map((v, i) => v + b3bg[i]);
 const b3raw = b3fit.map((v, i) => v + Math.sin(i));
 
@@ -515,6 +539,7 @@ const b3tpl = {
   peak_windows: [{ label: 'a', center_ev: 870, observed: { fwhm_ev: 1.6, gl_pct: 30 } }, { label: 'b', center_ev: 875, observed: { fwhm_ev: 1.0, gl_pct: 30 } }],
   background: 'linear',
   applicable_window_ev: 18,
+  fit_window_ev: { lo: 864, hi: 880 },
 };
 
 check('X1 审计好产物：R²/残差/峰顶缺口/窗口全过，verdict=pass', () => {
@@ -623,7 +648,7 @@ const runJson = existsSync(runFile) ? JSON.parse(readFileSync(runFile, 'utf8')) 
 
 check('X5 HTTP /xps/audit：200 带 verdict，模板不存在 404', () => {
   assert.equal(auditOk.status, 200, JSON.stringify(auditOk.json));
-  assert.equal(auditOk.json.verdict, 'pass');
+  assert.equal(auditOk.json.verdict, 'pass', JSON.stringify(auditOk.json.checks));
   assert.match(auditOk.json.scope, /不解析 \.xps/);
   assert.equal(audit404.status, 404);
 });
@@ -636,6 +661,7 @@ check('X6 chargeCorrection 五字段：写入可回读，shift 与 target−meas
   assert.equal(chargeBad.json.code, 'bad-charge-correction');
   assert.match(chargeBad.json.errors.join('\n'), /shift_ev 必须等于/);
   assert.equal(validateChargeCorrection({ reference_peak: 'C 1s' }).ok, false);
+  assert.deepEqual(validateChargeCorrection(null), { ok: true, value: null }, 'null = 未登记，函数本身要放行（与路由 :911 一致）');
 });
 
 check('X7 use 缺荷电登记 → warnings 点名；登记后不再出现', () => {
@@ -679,6 +705,146 @@ check('X10 客户端「审计这份」：调 /audit、传两条路径与模板�
   assert.match(src, /spectrumPath: specPath[\s\S]{0,60}peaksPath: peaksPath/, '必须把谱图与峰表路径一起送审');
   assert.match(src, /disabled: isTeach \|\| busy \|\| specPath\.trim\(\) === ""/, '教学档与空路径时按钮要禁用');
   assert.match(src, /不解析 \.xps/, '审计结论要写明只审文本导出');
+});
+
+/* ── 第五批：拟合区 fit_window_ev 真正传进 xpspeak_fit ── */
+
+check('Y1 fit 步骤带 window=[fit_window.lo, fit_window.hi]（不再吃整条谱）', () => {
+  const t = { ...GOOD, fit_window_ev: { lo: 844.1, hi: 884.1 }, peak_windows: [{ label: 'Ni 2p3/2', center_ev: 864 }] };
+  const ins = useInstruction(t, 'exec', { lo: 830, hi: 900 });
+  const fitStep = ins.instruction.steps.find((x) => x.tool === 'xpspeak_fit');
+  assert.deepEqual(fitStep.arguments.window, [844.1, 884.1], 'window 必须原样来自模板');
+  assert.equal(ins.instruction.fields.fit_window_ev.lo, 844.1);
+});
+
+check('Y2 谱比拟合区窄 → window 取交集并 warning；无交集 → 拒绝', () => {
+  const t = { ...GOOD, fit_window_ev: { lo: 844.1, hi: 884.1 }, peak_windows: [{ label: 'Ni 2p3/2', center_ev: 864 }] };
+  const ins = useInstruction(t, 'exec', { lo: 850, hi: 900 });
+  assert.equal(ins.ok, true);
+  assert.deepEqual(ins.instruction.steps.find((x) => x.tool === 'xpspeak_fit').arguments.window, [850, 884.1]);
+  assert.match(ins.instruction.warnings.join('\n'), /交集/);
+  const none = useInstruction(t, 'exec', { lo: 900, hi: 950 });
+  assert.equal(none.ok, false);
+  assert.equal(none.code, 'window-outside-spectrum');
+});
+
+check('Y3 老模板没有 fit_window_ev → 不传 window，且必须警告「按整条谱拟合」', () => {
+  const t = { ...GOOD, peak_windows: [{ label: 'Ni 2p3/2', center_ev: 864 }] };
+  const ins = useInstruction(t, 'exec', { lo: 830, hi: 900 });
+  assert.equal(ins.ok, true);
+  assert.equal(ins.instruction.steps.find((x) => x.tool === 'xpspeak_fit').arguments.window, undefined);
+  assert.match(ins.instruction.warnings.join('\n'), /按整条谱拟合/);
+  assert.match(ins.instruction.warnings.join('\n'), /fit_window_ev/);
+});
+
+check('Y4 schema：fit_window_ev 必须 lo<hi、0–1500，且覆盖各峰 center ± fwhm_max', () => {
+  const base = { ...GOOD, peak_windows: [{ label: 'Ni 2p3/2', center_ev: 864 }], fwhm_max: 2.0 };
+  const ok = validateTemplate({ ...base, fit_window_ev: { lo: 844.1, hi: 884.1 } });
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+  assert.deepEqual(ok.template.fit_window_ev, { lo: 844.1, hi: 884.1 });
+  for (const bad of [
+    { ...base, fit_window_ev: { lo: 884.1, hi: 844.1 } },
+    { ...base, fit_window_ev: { lo: 844.1 } },
+    { ...base, fit_window_ev: { lo: 844.1, hi: 2000 } },
+    { ...base, fit_window_ev: { lo: 866, hi: 872 } }, // 只盖到 866±2，没包住 864±2？lo 866 > 862
+    { ...base, fit_window_ev: { lo: 864, hi: 866 } },
+  ]) {
+    const r = validateTemplate(bad);
+    assert.equal(r.ok, false, JSON.stringify(bad));
+    assert.match(r.errors.join('\n'), /fit_window_ev/);
+  }
+});
+
+/* ── 第四批：R² 双口径，闸按扣背景 ── */
+
+const b4dir = join(tmp, 'b4');
+mkdirSync(b4dir, { recursive: true });
+const b4be = [];
+for (let i = 0; i < 200; i += 1) b4be.push(Number((880 - i * 0.1).toFixed(3)));
+const b4bg = b4be.map((x) => 6000 + (880 - x) * 300);
+const b4comp = b4be.map((x) => gauss(x, 872, 1.4, 3000) + gauss(x, 866, 1.0, 1200));
+const b4raw = b4comp.map((v, i) => v + b4bg[i] + Math.sin(i) * 8);
+const b4fit = b4comp.map((v, i) => 0.7 * v + b4bg[i]);
+const b4spec = writeSpec(join(b4dir, 'r2_spectrum.dat'), { be: b4be, raw: b4raw, fit: b4fit, bg: b4bg });
+
+const r2nums = (detail) => {
+  const bg = /R²\(扣背景\)=([\d.]+)/.exec(detail);
+  const raw = /R²\(raw\)=([\d.]+)/.exec(detail);
+  assert.ok(bg && raw, `detail 必须同时写两个口径：${detail}`);
+  return { bg: Number(bg[1]), raw: Number(raw[1]) };
+};
+
+check('X11 审计 R² 双口径：raw 0.9857 会放过、扣背景 0.8933 必须 warn（闸按扣背景）', () => {
+  const a = auditArtifacts({ spectrumPath: b4spec, peaksPath: null, template: null });
+  const c = a.checks.find((x) => x.id === 'fit-quality');
+  assert.ok(c, '必须给出 fit-quality');
+  const v = r2nums(c.detail);
+  assert.ok(v.raw >= 0.97, `raw 口径应接近 1：${v.raw}`);
+  assert.ok(v.bg >= 0.85 && v.bg < 0.90, `扣背景口径应落在 0.85–0.90：${v.bg}`);
+  assert.equal(c.status, 'warn', `扣背景 ${v.bg} < 0.90 必须 warn，不许被 raw ${v.raw} 抬成 pass`);
+  assert.match(c.detail, /闸按扣背景/, 'detail 要写明闸用哪个口径');
+});
+
+check('X11b 真产物双口径：扣背景 0.8683 / raw 0.9152（容差 1e-3）', () => {
+  const dir = 'E:/文档/deepseek-harness/XPS Peak/out/2_Ni2p_v2';
+  if (!existsSync(join(dir, '2_Ni2p_NiMoS284.6_spectrum.dat'))) {
+    process.stdout.write('  skip 本机没有 v2 真产物，跳过双口径数值核对（如实标记 skipped）\n');
+    return;
+  }
+  const a = auditArtifacts({
+    spectrumPath: join(dir, '2_Ni2p_NiMoS284.6_spectrum.dat'),
+    peaksPath: join(dir, '2_Ni2p_NiMoS284.6_peaks.dat'),
+    template: null,
+  });
+  const v = r2nums(a.checks.find((x) => x.id === 'fit-quality').detail);
+  assert.ok(Math.abs(v.bg - 0.868272) <= 1e-3, `扣背景 R²=${v.bg}，应为 0.868272`);
+  assert.ok(Math.abs(v.raw - 0.915217) <= 1e-3, `raw R²=${v.raw}，应为 0.915217`);
+});
+
+const resolvePy = () => {
+  const candidates = [
+    process.env.XPSPEAK_PYTHON,
+    'C:/Users/12576/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/python/python.exe',
+    'python',
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      execFileSync(candidate, ['-c', 'import sys;print(sys.version_info[0])'], { stdio: 'pipe', timeout: 15000 });
+      return candidate;
+    } catch {
+      /* 试下一个 */
+    }
+  }
+  return null;
+};
+
+check('X12 xps_fit 双口径：r2 扣背景、r2_raw 原始；preflight 闸读 r2 不读 raw', () => {
+  const pyBin = resolvePy();
+  if (pyBin === null) {
+    process.stdout.write('  skip 找不到 python，跳过 xps_fit 双口径核对\n');
+    return;
+  }
+  const script = `import sys, json
+sys.path.insert(0, ${JSON.stringify(join(REPO, 'server'))})
+import xps_fit
+E, raw, bg, ncol = xps_fit.load(${JSON.stringify(b4spec)})
+res = xps_fit.fit(E, raw, bg, [872, 866], ds=0, ratio=0.5, eta=0.3)
+out = {"keys": [k for k in ("r2", "r2_raw") if k in res], "r2": res["r2"], "r2_raw": res["r2_raw"]}
+fake = dict(res, r2=0.80, r2_raw=0.99, bound=[], not_optimized=[])
+pf = xps_fit.preflight(fake, E=E, bg_used="file", expect_bg="file", edge_ratio=0)
+out["errors"] = pf["errors"]
+print(json.dumps(out))`;
+  const out = JSON.parse(execFileSync(pyBin, ['-c', script], { stdio: 'pipe', timeout: 60000 }).toString('utf8').trim());
+  assert.deepEqual(out.keys.sort(), ['r2', 'r2_raw'], '两个口径的键都要有');
+  assert.ok(out.r2_raw > out.r2, `背景非零时 raw 门槛更松：r2=${out.r2} r2_raw=${out.r2_raw}`);
+  const joined = out.errors.join('\n');
+  assert.match(joined, /R²\(扣背景\)=0\.8000/, `闸必须按扣背景判：${joined}`);
+  const selftestOut = execFileSync(pyBin, [join(REPO, 'server', 'xps_fit.py'), '--selftest'], {
+    stdio: 'pipe',
+    timeout: 60000,
+  }).toString('utf8');
+  assert.match(selftestOut, /R²\(扣背景\)/);
+  assert.match(selftestOut, /r2_raw/);
 });
 
 check('⑤ 详情表：卡片能开详情，含 GL 与「模板值 vs 实测值」两列', () => {
@@ -908,6 +1074,41 @@ print(json.dumps([xps_fit.gl(x, 2.0, 1.2, 1000.0, 0.3) for x in ${JSON.stringify
     });
   });
 }
+
+check('Y5 audit 与 xps_fit 对同一份 CSV 的 R² 差 < 1e-3（同一拟合区、同一扣背景口径）', () => {
+  if (!py) {
+    process.stdout.write('  skip 找不到 python，跳过 audit↔fit R² 对拍\n');
+    return;
+  }
+  const d = join(tmp, 'b5');
+  mkdirSync(d, { recursive: true });
+  const be = [];
+  for (let i = 0; i < 401; i += 1) be.push(Number((884.37 - i * 0.1).toFixed(3)));
+  const bg = be.map((x) => 6000 + (884.37 - x) * 12);
+  // 数据必须按 xps_fit 同一模型（pseudo-Voigt，eta=0.3）生成，否则比的是模型差不是口径差
+  const comp = be.map((x) => pseudoVoigt(x, 862, 1.4, 3000, 0.3) + pseudoVoigt(x, 856, 1.2, 1400, 0.3));
+  const extra = be.map((x) => pseudoVoigt(x, 873, 1.6, 2600, 0.3)); // 2p1/2 区未建模
+  const raw = comp.map((v, i) => v + bg[i] + extra[i]);
+  const fitcol = comp.map((v, i) => v + bg[i]);
+  const spec = writeSpec(join(d, 'window_spectrum.dat'), { be, raw, fit: fitcol, bg });
+  const win = { lo: 844.4, hi: 866.4 };
+  const script = `import sys, json
+sys.path.insert(0, ${JSON.stringify(join(REPO, 'server'))})
+import xps_fit
+E, raw, bg, ncol = xps_fit.load(${JSON.stringify(spec)})
+res = xps_fit.fit(E, raw, bg, [862, 856], ds=0, ratio=0.5, eta=0.3, ctol=0.5, lo=${win.lo}, hi=${win.hi})
+print(json.dumps({"r2": res["r2"], "n": res["n"]}))`;
+  const out = JSON.parse(execFileSync(py, ['-c', script], { stdio: 'pipe', timeout: 60000 }).toString('utf8').trim());
+  const whole = auditArtifacts({ spectrumPath: spec, peaksPath: null, template: null });
+  const wholeR2 = Number(/R²\(扣背景\)=([\d.]+)/.exec(whole.checks.find((c) => c.id === 'fit-quality').detail)[1]);
+  assert.ok(wholeR2 < 0.9, `整条谱算 R² 应被窗口外的 2p1/2 拉低，实际 ${wholeR2}`);
+  const part = auditArtifacts({ spectrumPath: spec, peaksPath: null, template: null, window: [win.lo, win.hi] });
+  const partR2 = Number(/R²\(扣背景\)=([\d.]+)/.exec(part.checks.find((c) => c.id === 'fit-quality').detail)[1]);
+  assert.ok(Math.abs(partR2 - out.r2) < 1e-3, `audit ${partR2} 对 fit ${out.r2}，差必须 < 1e-3`);
+  // audit 记的是实际切到的数据边界（网格可能差半格），不是请求值本身
+  assert.ok(Math.abs(part.summary.fit_window_ev[0] - win.lo) < 0.2, JSON.stringify(part.summary.fit_window_ev));
+  assert.ok(Math.abs(part.summary.fit_window_ev[1] - win.hi) < 0.2, JSON.stringify(part.summary.fit_window_ev));
+});
 
 /* ───────── 11. 拟合参数与保存前硬前置（纯 python 侧） ───────── */
 

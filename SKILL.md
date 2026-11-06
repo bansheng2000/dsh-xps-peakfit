@@ -247,8 +247,8 @@ whenToUse: 用户给出 XPS 数据（全谱和/或高分辨谱），要求做荷
 用户只说一句「按模板做 / 用这个模板」，agent 自己读完再动手，不回头问第二遍参数。
 
 1. **先读选择态**：`~/.dsh/dsh-xps-peakfit/selection.json`（面板「选这个」写入；`GET /xps/selection` 读同一份）→ `{templateId, spectrumPath, chargeCorrection, updatedAt, lastRun}`。`chargeCorrection` 五个字段缺一不可：`reference_peak` / `measured_ev` / `target_ev` / `shift_ev` / `method`，且 `shift_ev` 必须等于 `target_ev − measured_ev`（写入时服务端校验，不一致 400）；只存 shift 的话，事后没人能判断它是怎么来的。缺失时 `use` 只给 warnings 不拦，但第 1 步必须先把它补上。`templateId` 为 null 或模板已删 → 请用户在面板点「选这个」（连同谱图路径一起填），不要自己猜模板、也不要随手挑一个收藏项代替。
-2. **一次取齐参数**：模板字段按上节映射表转成 `xpspeak_fit` 参数；逐峰 `eta` 取 `peak_windows[i].eta`（没有才回落模板 `eta`；`observed.gl_pct` 只作对照，不进拟合），`ctol = 各峰 search_ev 的最大值`，`bg` 按 `background` 映射。
-3. **执行顺序**：`xpspeak_open`（`spectrumPath`）→ `xpspeak_fit`。档位闸门照旧：教学档停在手工四步，不许代执行。模板写了 `applicable_window_ev` 而本次谱窗不足其 90% 时，`use` 会直接 422 —— 不许绕过（峰形与边界截断都不可比），换同宽窗口或另建该宽度的模板；90%–100% 会放行并给 warnings，按提示把「面积只按当前窗口积分」写进产物。
+2. **一次取齐参数**：模板字段按上节映射表转成 `xpspeak_fit` 参数；逐峰 `eta` 取 `peak_windows[i].eta`（没有才回落模板 `eta`；`observed.gl_pct` 只作对照，不进拟合），`ctol = 各峰 search_ev 的最大值`，`bg` 按 `background` 映射；`window` 取模板 `fit_window_ev`（与谱范围取交集）—— 不传 window 等于拿整条谱拟合，窗口外未建模的峰（如 2p1/2）会把 R² 拉到 0.4–0.6 并逼着峰往边界跑。
+3. **执行顺序**：`xpspeak_open`（`spectrumPath`）→ `xpspeak_fit`。档位闸门照旧：教学档停在手工四步，不许代执行。闸看的是**拟合区** `fit_window_ev`：本次谱宽不足其 90% → `use` 直接 422，不许绕过；90%–100% 放行并给 warnings；`window` 与谱范围取交集，无交集直接 422 `window-outside-spectrum`。`applicable_window_ev` 只管「数据够不够长」的提示，**不再当拟合窗口**（文件扫描宽度 ≠ 拟合区：同一份 Ni 2p 谱 40 eV 全窗 R²=0.5869、4 项撞界，收到 844.37–866 后 R²=0.9481、无撞界）。
 4. **硬前置拦住就不许落盘**：撞界（`res.bound` 非空）、背景不一致、峰心距谱端 < 3×FWHM 的截断警告——**任一出现就停下**，不 `xpspeak_export`、不 `xpspeak_save`，把原因写回 `selection.lastRun`（`POST /xps/selection` 带 `lastRun`，`templateId`/`spectrumPath` 保持原值），再如实报给用户；同时把这次的门检查与失败原因写进 `run.json`（`POST /xps/runlog`，见下节）。
 5. **全过才交付**：`xpspeak_export` → `xpspeak_save`，然后把峰表（中心 / FWHM / 面积 / 占比 / ±σ）与来源（谱图路径、模板名、生成的文件）写回 `lastRun`，并调 `POST /xps/runlog` 在产物目录落 `run.json`：模板 id、实际 fit 参数、R²/rms/撞界/门检查、每个产物的 sha256 与字节数、时间。`run.json` 是这次交付的凭证 —— 没有它，事后无法证明这份图是这条谱、这组参数跑出来的。
 6. **教学档**：`POST /xps/selection` 返回 403 `teaching-mode`，面板按钮同样禁用；此时改手工四步、把模板字段念给用户听，不许悄悄切档或换通道绕过。
@@ -259,7 +259,7 @@ whenToUse: 用户给出 XPS 数据（全谱和/或高分辨谱），要求做荷
 `POST /xps/audit`，入参 `{spectrumPath, peaksPath, templateId}`，返回 `{ok, verdict: "pass"|"warn"|"fail", scope, checks: [{id, name, status, detail}], summary}`。面板顶栏「审计这份」走同一个路由（教学档同样禁用）。
 
 1. **只审文本导出**：`_spectrum.dat`（B.E. / Raw Intensity / Peak Sum / Background / difference）与 `_peaks.dat`（Peak / Position / Area / FWHM / %GL）。**不解析 `.xps`** —— 那是 XPSPeak 私有格式，实测不同点数文件偏移读出来是垃圾，不许承诺。要审 `.xps`，先在软件里打开并导出这两份文本。
-2. **七项检查**（阈值与保存前的校验链同源，避免「存的时候一个标准、审的时候另一个标准」）：`fit-quality`（R² <0.90 警告 / <0.85 阻断）、`residual-structure`（残差四段，任一 |均值| >0.5×rms 阻断）、`peak-gap`（max|data−fit| 占峰顶 >5% 警告 / >10% 阻断）、`bg-shape`（linear 模板下 Background 列必须两端直线，偏离 > 扣背景峰高 0.5% 阻断）、`template-copied`、`window-applicability`（不足模板标定 90% 阻断）、`boundary-truncation`（峰心距端点 <3×FWHM 警告）。
+2. **七项检查**（阈值与保存前的校验链同源，避免「存的时候一个标准、审的时候另一个标准」）：`fit-quality`（**R² 按扣背景 `(Raw−Background)` 对 `(Peak Sum−Background)` 算** —— 与 XPSPeak 保存的同一刻度；同一份 v2 产物扣背景 0.8683 判 fail，按原始计数 0.9152 会误判 pass。detail 两个口径都写，闸只认扣背景，<0.85 阻断 / <0.90 警告）、`residual-structure`（残差四段，任一 |均值| >0.5×rms 阻断）、`peak-gap`（max|data−fit| 占峰顶 >5% 警告 / >10% 阻断）、`bg-shape`（linear 模板下 Background 列必须两端直线，偏离 > 扣背景峰高 0.5% 阻断）、`template-copied`、`window-applicability`（对 `fit_window_ev` 判，不足 90% 阻断；拟合区未标时 skip）、`boundary-truncation`（峰心距拟合区端点 <3×FWHM 警告）。
 3. **`template-copied` 的判据**：各峰 FWHM 全等于模板 `observed.fwhm`（±0.01）且峰位是整体平移（离散 ≤0.05 eV）→ 判 `<fail>`，detail 写明平移了多少 eV。这是「把模板峰形搬过去只调高度」，不是拟合。没有模板时退一步：三个以上峰的 FWHM 完全相同 → 警告。
 4. **verdict 的用法**：`fail` 不许当结论引用，先按 detail 指出的那一项修（改峰数 / 改背景 / 重拟合）；`warn` 可以在产物里如实标注后使用；`skip` 是「这项没条件审」（缺模板、缺列、背景不是 linear），不是通过。
 
@@ -270,7 +270,7 @@ whenToUse: 用户给出 XPS 数据（全谱和/或高分辨谱），要求做荷
 1. **撞界**：参数顶在 `ctol` / `wlo` / `whi` / `hmax` 上 → 阻断。顶界的值是约束决定的、不是数据拟合出来的。
 2. **背景不一致**：模板 `background` 与实际 `bg` 不同 → 阻断；`tougaard` 不在 `xps_fit` 支持内，按 `file` 处理但必须警告。
 3. **未优化参数**：某参数 |终值−初值| < 1e-6 且不在界上 → 阻断。参数没动就是写死，RMS 再小也不能出结论。
-4. **优度**：R² < 0.90 警告、< 0.85 阻断。依据：实测那份「模板峰形只调高度」的拟合 R²=0.874（落在警告区）；0.85 以下残差与信号同量级。
+4. **优度**：`r2` 一律按扣背景口径（`(Raw−Background)` 对 `(Peak Sum−Background)`，XPSPeak 保存的就是这个刻度），< 0.90 警告、< 0.85 阻断。`r2_raw` 只作信息同时回报 —— 背景能占计数一大半，raw 口径天然接近 1（同一份 v2 产物 raw 0.9152 会放过、扣背景 0.8683 才是真实水平）。依据：实测那份「模板峰形只调高度」的拟合扣背景 R²=0.874（落在警告区）；0.85 以下残差与信号同量级。
 5. **残差结构**：残差按窗口四段取均值，任一段 |均值| > 0.5×rms → 阻断。依据：同一份四段均值 −1131 / −2590 / −808 / −174 cps、rms 2116，第二段 1.22×rms —— 是系统性偏移，不是噪声。
 6. **峰顶缺口**：max|data−fit| / 峰高 > 5% 警告、> 10% 阻断。依据：6070 / 60963 = 10.0%，峰顶差这么多说明峰形没对上。
 7. **背景形状（linear 模板）**：导出谱 `Background` 列与两端直线最大偏离 > 峰高 0.5% → 阻断。依据：那份 `.xps` 的背景是台阶（857.0 偏 +2567、851.0 偏 −2872 = 峰高 10.9%），图上是直线、文件里是台阶，别人重开会得到不同数字。

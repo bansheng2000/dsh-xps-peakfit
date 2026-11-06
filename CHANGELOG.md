@@ -20,6 +20,10 @@
 - **窗口适用性（第二批）**：新增顶层 `applicable_window_ev`（>0，可选）。`POST /xps/templates/<id>/use` 收可选 `spectrumPath`（缺省用选择态里那份），读首列范围；谱窗比模板窄 → 422 `window-too-narrow`（写明两边宽度），够宽放行；读不出范围只给 warnings「未核对」。`lib/routes.js:spectrumRange()` 只读首列、不参与拟合。自检 72 → 77 项（W1–W5）。
 - **第三批：审计 / 荷电登记 / run.json**。新增 `lib/audit.js`（只读解析文本导出，七项检查：优度、残差结构、峰顶缺口、背景形状、照搬模板、窗口适用性、边界截断；判据与保存前校验链同源，verdict = pass/warn/fail）。新增 `POST /xps/audit`（`{spectrumPath, peaksPath, templateId}`，坏文件 400、模板不存在 404）与面板「审计这份」；实测那份 176 点 Ni 2p 产物判 fail（残差第二段 1.22×rms、峰顶缺口 10.8%、Background 偏离直线 11.3%、峰位整体平移 −0.896 eV = 照搬模板、窗口 17.5 对 40）。`selection.json` 加 `chargeCorrection` 五字段并在 `POST /xps/selection` 校验（`shift_ev` 必须等于 `target_ev − measured_ev`，否则 400）；缺登记时 `use` 仍 200 但 warnings 点名。新增 `POST /xps/runlog`：在产物目录写 `run.json`（模板 id、fit 参数、r2/rms/撞界/门检查、每个产物 sha256+字节数、时间），教学档 403。自检 77 → 86 项（X1–X9）。
 - **窗口闸改 90% 容差**：`applicable_window_ev` 不再要求目标谱窗口 ≥ 模板标定宽度（差 0.2 eV 就判死不合理：同一份 Ni 2p 数据 401 点 884.0→844.0 = 40.000，厂商 Peak Table 自己的拟合区是 883.9→844.1 = 39.8）。现在 `< 90%` 才 422（message 写模板宽度、本次宽度与 90% 下限）；90%–100% 放行并在 `warnings` 写明窄了多少 eV；17.5 对 40 仍判死。
+- **R² 改扣背景口径（第四批）**：`lib/audit.js` 的 `fit-quality` 同时算两个口径，闸只认扣背景 —— 同一份 v2 产物按原始计数 0.9152 会判 pass，按 `(Raw−Background)` 对 `(Peak Sum−Background)` 是 0.8683，与 XPSPeak 保存的 0.868272 同刻度。`server/xps_fit.py` 的 `r2` 本来就是扣背景口径（`target = raw − bg`），本次补 `r2_raw` 并回报，`preflight` 两道 R² 判据语义未变、`bound`/`aic` 未动。
+- **拟合区 `fit_window_ev`（第五批）**：模板 schema 新增顶层 `fit_window_ev: {lo, hi}`（0–1500、lo<hi，且必须覆盖各峰 `center_ev ± fwhm_max`）；`useInstruction` 真正把 `window: [lo, hi]` 传给 `xpspeak_fit`（与谱范围取交集，无交集 422 `window-outside-spectrum`），闸改成对拟合区宽度判 90%（整数比较），`applicable_window_ev` 降级为「数据够不够长」的提示、不再参与判决；老模板没有该字段时不传 window，但 warnings 必须写「按整条谱拟合、窗口外未建模峰会拉低 R²」。`lib/audit.js` 的 window-applicability 与 R²/残差/峰顶缺口同样按拟合区切片，保证 audit 与 fit 同一口径。起因是实测：Ni 2p 模板的参数在 40 eV 全窗上 R²=0.5869、4 项撞界，收到 844.37–866 后 R²=0.9481、无撞界 —— 868–878 的 2p1/2 峰没建模，一进窗口就把优度拉低并逼峰往边界跑。
+- **`validateChargeCorrection(null)` 措辞对齐**：函数接受 `null` 返回 `{ok:true, value:null}`（与路由层「null = 未登记」一致）；容差以代码为准（`> 0.01`，不是 0.005）。
+- 自检 86 → 95 项（X11/X11b/X12 三条双口径 + W4/W5 改写 + Y1–Y5 五条拟合区）。
 
 ## v2.8.0（未发版）：插件壳 + 模板页
 

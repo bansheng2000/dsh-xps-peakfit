@@ -327,7 +327,12 @@ def fit(E, raw, bg, centers, ds=1.18, ratio=0.5, eta=0.3,
             not_opt.append(dict(comp=i + 1, param=BOUND_NAMES[f], label=BOUND_LABELS[f],
                                 value=float(v), init=float(p0[j])))
     mean_t = sum(target) / n
+    # 闸用扣背景口径：target = raw - bg（见上），sst 是「扣背景后的起伏」。
+    # raw 口径只作信息：背景能占计数一大半，raw R² 天然接近 1 —— 同一份实测产物
+    # raw 0.9152 判 pass，扣背景 0.8683 才与 XPSPeak 自己保存的 0.868272 同刻度。
     sst = sum((t - mean_t) ** 2 for t in target)
+    mean_raw = sum(raw) / n
+    sst_raw = sum((v - mean_raw) ** 2 for v in raw)
     comps = []
     for i in range(nc):
         c, w, h = p[3 * i], p[3 * i + 1], p[3 * i + 2]
@@ -352,7 +357,9 @@ def fit(E, raw, bg, centers, ds=1.18, ratio=0.5, eta=0.3,
     for c, pv in zip(comps, par):
         c["partner"] = round(pv, 4)
     return dict(nc=nc, n=n, k=k, ds=ds, ratio=ratio, eta=(et if isinstance(eta, (list, tuple)) else et[0]), eta_list=et,
-                rms=round(math.sqrt(sse / n), 2), r2=round(1.0 - sse / sst, 6) if sst else None,
+                rms=round(math.sqrt(sse / n), 2),
+                r2=round(1.0 - sse / sst, 6) if sst else None,          # 扣背景口径：闸用这个
+                r2_raw=round(1.0 - sse / sst_raw, 6) if sst_raw else None,  # 原始计数口径：只作信息
                 aic=round(n * math.log(sse / n) + 2 * k, 2), sse=round(sse, 2),
                 comps=comps, params=[float(v) for v in p], params_err=[round(v, 6) for v in sig], bound=bound,
                 p0=[float(v) for v in p0], not_optimized=not_opt,
@@ -440,9 +447,13 @@ def preflight(res, E=None, bg_used=None, expect_bg=None, edge_ratio=3.0, bg_col=
     r2 = res.get("r2")
     if r2 is not None:
         if r2 < R2_BLOCK:
-            errors.append("R²=%.4f < %.2f：残差与信号同量级，模型与数据不是一件事，不能出结论。" % (r2, R2_BLOCK))
+            errors.append("R²(扣背景)=%.4f < %.2f：残差与信号同量级，模型与数据不是一件事，不能出结论。"
+                          "（raw 口径 %.4f 只作参考：背景占比越高它越虚高，不能拿来判优劣）"
+                          % (r2, R2_BLOCK, res.get("r2_raw") if res.get("r2_raw") is not None else float("nan")))
         elif r2 < R2_WARN:
-            warnings.append("R²=%.4f < %.2f：优度不足，结论只能标「不足以判定」并写清缺什么。" % (r2, R2_WARN))
+            warnings.append("R²(扣背景)=%.4f < %.2f：优度不足，结论只能标「不足以判定」并写清缺什么。"
+                            "（raw 口径 %.4f 只作参考）"
+                            % (r2, R2_WARN, res.get("r2_raw") if res.get("r2_raw") is not None else float("nan")))
 
     segs = resid_segments(res)
     rms = float(res.get("rms") or 0.0)
@@ -523,7 +534,8 @@ def report(res, head="", include_bounds=True, include_warnings=True):
     eta_txt = "%.2f" % et[0] if len(set(et)) == 1 else "/".join("%.2f" % v for v in et)
     L.append("模型: %d 条双峰（Δ=%.3f eV, 面积比 1:%.2f, 等宽, eta=%s）  n=%d  k=%d"
              % (res["nc"], res["ds"], res["ratio"], eta_txt, res["n"], res["k"]))
-    L.append("拟合优度: rms=%.2f cps   R²=%s   AIC=%.2f" % (res["rms"], res["r2"], res["aic"]))
+    L.append("拟合优度: rms=%.2f cps   R²(扣背景)=%s   R²(raw)=%s   AIC=%.2f"
+             % (res["rms"], res["r2"], res.get("r2_raw"), res["aic"]))
     w = res.get("window") or {}
     if w.get("lo") is not None:
         L.append("窗口: %.3f – %.3f eV（%d 点，基线的两个端点在窗口内重取）"
@@ -607,9 +619,12 @@ def selftest():
     assert abs(c["center"] - 162.0) < 0.01, c
     assert abs(c["fwhm"] - 0.95) < 0.02, c
     assert abs(c["area"] - area_truth) / area_truth < 0.03, (c["area"], area_truth)
+    # 两个 R² 都必须出：r2 是扣背景口径（闸用），r2_raw 是原始计数口径（只作信息）。
+    assert "r2" in res and "r2_raw" in res, sorted(res)
     assert res["r2"] > 0.9999, res["r2"]
-    print("selftest OK: center %.3f (真值 162.000)  FWHM %.3f (0.950)  area %.0f (%.0f)  R² %.6f"
-          % (c["center"], c["fwhm"], c["area"], area_truth, res["r2"]))
+    assert res["r2_raw"] >= res["r2"], (res["r2_raw"], res["r2"])  # 背景非零时 raw 门槛更松
+    print("selftest OK: center %.3f (真值 162.000)  FWHM %.3f (0.950)  area %.0f (%.0f)  R²(扣背景) %.6f  r2_raw %.6f"
+          % (c["center"], c["fwhm"], c["area"], area_truth, res["r2"], res["r2_raw"]))
 
     # --- P0-1/P0-3 回归：撞界必须显式标出（峰高超默认 hmax + FWHM 低于默认 wlo）---
     E2 = [166.0 - 0.02 * i for i in range(301)]

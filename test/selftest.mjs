@@ -19,6 +19,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  cleanupImportArtifacts,
   createTemplate,
   createRoutes,
   listTemplates,
@@ -2647,6 +2648,58 @@ check('J7 面板：导入按钮存在、提交前必须补齐 element/orbital/ca
   assert.ok(iFn > 0, '面板里要有 submitDraft');
   assert.ok(iCheck > iFn && iPost > iCheck, '必填检查要排在保存请求之前');
   assert.match(src, /className: String\(draft\[key\] \?\? ""\)\.trim\(\) === "" \? "req" : ""/, '空的检索键要标红');
+});
+
+check('J8 导入收尾清理：落盘的源 .xps / 工作目录 / 锁全删，且路由 finally 用的就是这个函数', () => {
+  const dir = join(tmp, 'cleanup-j8');
+  mkdirSync(dir, { recursive: true });
+  const stored = join(dir, '20260101000000-clean.xps');
+  writeFileSync(stored, 'XPSPEAK 4.0D', 'utf8');
+  const work = join(dir, '20260101000000-work');
+  mkdirSync(work, { recursive: true });
+  writeFileSync(join(work, 'peaks.dat'), 'x', 'utf8');
+  const lock = join(dir, '.lock');
+  writeFileSync(lock, '', 'utf8');
+  const gone = cleanupImportArtifacts([work, stored, lock, null]);
+  assert.equal(existsSync(stored), false, '落盘的源 .xps 必须删掉（replay 夹具不产生它，端到端跑不到这条分支）');
+  assert.equal(existsSync(work), false, '中间工作目录要删');
+  assert.equal(existsSync(lock), false, '锁要释放');
+  assert.equal(gone.length, 3, '返回的是实际清理成功的路径');
+  // 单测绿还不够：路由的 finally 必须真的调它，否则真导入仍会漏文件
+  const rs = readFileSync(join(REPO, 'lib', 'routes.js'), 'utf8');
+  assert.match(rs, /cleanupImportArtifacts\(\[workDir, stored, lockPath\]\)/, '导入 finally 必须调用清理函数');
+  assert.doesNotMatch(rs, /rmSync\(stored, \{ force: true \}\)/, '不许绕过清理函数直接 rmSync(stored)');
+});
+
+check('J9 静默模式：启动 SW_HIDE + 只隐藏本 pid + wait_new 改认隐藏记录（替身单测）', () => {
+  const pyBin = resolvePy();
+  if (pyBin === null) {
+    process.stdout.write('  skip 找不到 python，跳过 hidden 单测\n');
+    return;
+  }
+  let raw = '';
+  try {
+    raw = execFileSync(pyBin, [join(REPO, 'test', 'hidden_unit.py')], { stdio: 'pipe', timeout: 60000 }).toString('utf8');
+  } catch (e) {
+    // 单测失败时它会往 stdout 打一行 {"ok":false,...}，把那行捞出来给出可读原因
+    raw = `${e.stdout ?? ''}${e.stderr ?? ''}`;
+  }
+  const out = JSON.parse(raw.trim().split(/\r?\n/).filter(Boolean).pop());
+  assert.equal(out.ok, true, `hidden 单测失败：${out.message ?? raw.slice(0, 300)}`);
+  for (const must of ['启动时 SW_HIDE', '隐藏线程随 launch 启动、绑该 pid', '别的 pid 一个都不碰',
+    '静默态挑无菜单的 VB6 窗体', 'since 之前的记录不算新对话框', '导入脚本 run_gui 默认静默']) {
+    assert.ok(out.checks.includes(must), `hidden 单测少了这一项：${must}`);
+  }
+  // 默认真源：导入脚本必须默认静默，且留 --no-hidden 排障
+  const imp = readFileSync(join(REPO, 'server', 'xpspeak_import.py'), 'utf8');
+  assert.match(imp, /"--hidden",\s*dest="hidden",\s*action="store_true",\s*default=True/, '--hidden 必须默认开');
+  assert.match(imp, /"--no-hidden",\s*dest="hidden",\s*action="store_false"/, '要留 --no-hidden 排障开关');
+  assert.match(imp, /hidden=a\.hidden/, 'CLI 的值要真的传进 run_gui');
+  const drv = readFileSync(join(REPO, 'server', 'xpspeak_drive.py'), 'utf8');
+  assert.match(drv, /dwFlags \|= STARTF_USESHOWWINDOW[\s\S]{0,200}wShowWindow = SW_HIDE/, '启动时先 SW_HIDE');
+  assert.match(drv, /class HideKeeper/, '要有隐藏线程');
+  assert.match(drv, /floor = t0 if since is None else since/, 'wait_new 的时间闸（对话框被隐藏后不能靠可见性判断）');
+  assert.match(drv, /ts >= floor - 0\.3 and cls\(h\) == "ThunderRT6FormDC"/, '静默态只认 VB6 窗体记录');
 });
 
 /* ───────── 结果 ───────── */

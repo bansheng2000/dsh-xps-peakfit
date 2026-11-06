@@ -283,8 +283,13 @@ def _error_dialog_text(D, pid):
     return "\n".join(texts)
 
 
-def run_gui(src, outdir, exe=None):
-    """打开 .xps -> 导出 Peak Parameters 与 Spectrum。返回 (peaks_path, spec_path)。"""
+def run_gui(src, outdir, exe=None, hidden=True):
+    """打开 .xps -> 导出 Peak Parameters 与 Spectrum。返回 (peaks_path, spec_path)。
+
+    hidden=True（默认）走静默模式：启动 SW_HIDE + 80 ms 隐藏线程（见 xpspeak_drive.HideKeeper）。
+    实测只设 STARTUPINFO 不够，软件自己会 ShowWindow；隐藏后 SendMessage 仍能操作对话框。
+    排障时传 hidden=False，窗口就正常显示。
+    """
     import xpspeak_drive as D  # 只在 GUI 路径上 import：--replay 时完全不碰 Win32
 
     exe = exe or os.environ.get("XPSPEAK_EXE") or D.EXE_DEFAULT
@@ -295,7 +300,7 @@ def run_gui(src, outdir, exe=None):
     for p in (peaks_path, spec_path):
         if os.path.exists(p):
             os.remove(p)
-    p = D.launch(exe)
+    p = D.launch(exe, hidden=hidden)
     try:
         pid = p.pid
         proc = D.form(pid, D.FORM_PROC)
@@ -318,6 +323,10 @@ def run_gui(src, outdir, exe=None):
             time.sleep(0.8)
             D._kill_strays(pid)
     finally:
+        try:
+            D.stop_keeper(p)          # 隐藏线程随进程结束而停，别留后台轮询
+        except Exception:
+            pass
         try:
             p.terminate()
         except Exception:
@@ -346,6 +355,10 @@ def main(argv=None):
     ap.add_argument("--source-name", dest="source_name", default=None,
                     help="原始文件名（写进 provenance；不给就用 --in 的 basename）")
     ap.add_argument("--json", action="store_true", help="stdout 最后一行输出单个 JSON")
+    ap.add_argument("--hidden", dest="hidden", action="store_true", default=True,
+                    help="静默模式（默认）：窗口用 SW_HIDE 启动并 80ms 轮询隐藏，实测导出字节与可见模式相同")
+    ap.add_argument("--no-hidden", dest="hidden", action="store_false",
+                    help="排障用：正常显示窗口")
     a = ap.parse_args(argv)
 
     def fail(code, message, extra=None):
@@ -381,7 +394,7 @@ def main(argv=None):
                 if not os.path.exists(p):
                     return fail("bad-export", "夹具缺文件：%s" % p)
         else:
-            peaks_path, spec_path = run_gui(a.src, outdir, a.exe)
+            peaks_path, spec_path = run_gui(a.src, outdir, a.exe, hidden=a.hidden)
         src_name = a.source_name or os.path.basename(a.src)
         draft, warnings = draft_from_paths(peaks_path, spec_path, src_name, sha)
         if draft is None:

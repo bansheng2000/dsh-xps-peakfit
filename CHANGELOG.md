@@ -1,5 +1,16 @@
 # 变更记录
 
+## 第十六批：导入静默运行（默认 `--hidden`）+ 收尾清理的断言补强
+
+版本仍 `2.8.0`。
+
+- **静默模式**（`server/xpspeak_drive.py`）：`launch(..., hidden=False)` 启动时 `STARTUPINFO` 置 `STARTF_USESHOWWINDOW` + `wShowWindow=SW_HIDE`；新增 `HideKeeper(pid, interval=0.08)` 隐藏线程（`poll_once()` 扫 `tops(pid)`，只对 `IsWindowVisible` 的窗口 `ShowWindow(h, 0)`，记 `(ts, hwnd)`），随进程结束由 `stop_keeper()` 停掉。`build`/`export` 加 `hidden` 参数并在 `finally` 停线程。**只碰本次拉起的 pid**：实测用户自己开着的实例（pid 45932）Region 1 / XPS Peak Processing / XPSPEAK41 三个顶层窗口仍 `visible=True`。
+- **`wait_new` 改认隐藏记录**：静默态窗口不可见，原来「新可见的 VB6 窗体」判据失效；改为从 `keeper.hidden` 里挑 `ts >= since - 0.3`、`cls=="ThunderRT6FormDC"` 且无菜单（`GetMenu==0`，分峰主窗体有菜单会被随机重新 Show）的窗口。`build` 里 Background 与每个 Add Peak 都以 `menu_click` 前的时间戳作 `since`——用函数入口时间会漏掉 Background 对话框（它 +0.086 s 就出现并在 settle 期间被隐藏）。
+- **`server/xpspeak_import.py`**：`run_gui(..., hidden=True)`，CLI 新增 `--hidden`（默认开）/`--no-hidden`（排障）。
+- **收尾清理抽成函数**（`lib/routes.js` `cleanupImportArtifacts(paths)`）：导入 `finally` 改为调它清 `workDir`/`stored`/`lockPath`。原因：Chief 实测把 `server/xpspeak_import.py` 的 `os.remove` 换成 `pass` 后 **142 项仍全绿**——J1–J7 走 `--replay` 夹具，夹具模式不产生那份复制出来的 `.xps`，删除分支从没被执行。
+- **自检**：新增 J8（清理函数真删三个路径 + 路由 `finally` 必须调它、不许绕过它直接 `rmSync(stored)`）与 J9（`test/hidden_unit.py` 替身单测 18 项：启动标志、只隐藏本 pid、`poll_once` 只碰可见窗口、`wait_new` 的 since 闸与无菜单判据、`run_gui` 默认静默），144 项全过。四处变异各真红：导入 finally 不调清理 → J8（连带 J1–J4 因源 `.xps` 残留变红）；`wShowWindow=1` → J9「启动时 SW_HIDE: dwFlags=1 wShowWindow=1」；`floor = t0` 忽略 since → J9；`if True:` 隐藏不可见窗口 → J9「hidden 了 [(201,0),(202,0),(203,0)]」。
+- **实测读数**：静默导出 30241 B / 9.2 s / md5 `75f1fae44034f2bb16eac30d576aa7fe`，与可见模式**逐字节相同**；静默 `build` 全链路 28.2 s、写出 5643 B `.xps`，导出峰参数 `870.000/40000.000/1.200/30`、`874.000/30000.000/2.400/60` 与传入一致，Background（Shirley）与 Add Peak 对话框都被抓到；可见模式 build 回归 21.7 s / 4983 B 正常；真实 `.xps` 静默导入 12.9 s，回包与第十五批完全一致（`background shirley`、四峰同值、176 点、sha256 `8d354de2…`）。**窗口仍会闪现（10 ms 采样器实测单窗最长可见 0.29–0.36 s，含线程被抢占的偏差）**，不是 0；不建议改用独立桌面/窗口站。
+
 ## 第十五批：从 .xps 导入模板（峰参数取软件导出、背景判定与 audit 同源）
 
 版本仍 `2.8.0`。

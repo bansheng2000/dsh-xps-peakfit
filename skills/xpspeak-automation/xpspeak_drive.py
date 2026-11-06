@@ -16,7 +16,7 @@
   * Import (ASCII) 只认 CRLF 行尾，LF-only 文件会被静默读错（点数减半、B.E. 列变成强度值）-> ascii_crlf()
   * 传给对话框的路径必须是反斜杠形式（"C:\a\b.dat"）：正斜杠会被 Save 对话框拒绝 -> 对话框不关、文件写不出
 """
-import ctypes, itertools, os, re, subprocess, sys, time, shutil
+import ctypes, itertools, os, re, subprocess, sys, threading, time, shutil
 from ctypes import wintypes as w
 
 u = ctypes.windll.user32
@@ -35,6 +35,11 @@ CBN_SELCHANGE = 1
 # Background（标题 "Region"）对话框里的背景类型下拉：Items = Shirley / Linear / Tougaard。
 BG_DLG_TITLE, BG_TYPE_COMBO_ID = "Region", 13
 MF_BYPOSITION, IDOK = 0x400, 1
+# 静默模式（--hidden）：实测只设 STARTUPINFO 不够 —— 软件自己会 ShowWindow，窗口照样弹出。
+# 必须在启动后起一个 80 ms 轮询的线程，把该 pid 的可见顶层窗口逐个 ShowWindow(h, 0)。
+STARTF_USESHOWWINDOW, SW_HIDE = 0x00000001, 0
+HIDE_POLL_S = 0.08          # 轮询间隔 = 窗口最长可见时间（实测约 0.1 s 的闪现就是它决定的）
+u.ShowWindow.argtypes = [w.HWND, ctypes.c_int]
 u.GetWindowTextW.argtypes = [w.HWND, w.LPWSTR, ctypes.c_int]
 u.GetClassNameW.argtypes = [w.HWND, w.LPWSTR, ctypes.c_int]
 u.SendMessageW.argtypes = [w.HWND, w.UINT, w.WPARAM, ctypes.c_void_p]
@@ -237,19 +242,6 @@ def _vis(pid):
     return set(h for h in tops(pid) if u.IsWindowVisible(h))
 
 
-def wait_new(pid, before, timeout=10.0):
-    """等一个「之前不可见、现在可见」的窗体 —— XPSPeak 的对话框都是预先建好再 Show 的，
-    所以不能按句柄是否存在判断，只能比可见性。"""
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        for h in tops(pid):
-            # 只认 VB6 窗体：ComboLBox 之类的弹出列表也会「新可见」，抢到它就会找不到控件
-            if u.IsWindowVisible(h) and h not in before and cls(h) == "ThunderRT6FormDC":
-                return h
-        time.sleep(0.2)
-    return None
-
-
 def _fill(hwnd, pairs):
     for cid, val in pairs:
         c = next((c for c in kids(hwnd) if u.GetDlgCtrlID(c) == cid), None)
@@ -298,13 +290,100 @@ def set_combo(hwnd, cid, label, settle=0.8):
     return {"index": idx, "items": items, "selected": got}
 
 
-def launch(exe=EXE_DEFAULT):
+def launch(exe=EXE_DEFAULT, hidden=False):
     if not os.path.exists(exe):
         raise FileNotFoundError(
             "找不到 XPSPEAK41.exe: %s\n请设环境变量 XPSPEAK_EXE 指向本机真实的 XPSPEAK41.exe" % exe)
-    p = subprocess.Popen([exe], cwd=os.path.dirname(exe))
+    si = None
+    if hidden:
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= STARTF_USESHOWWINDOW
+        si.wShowWindow = SW_HIDE
+    p = subprocess.Popen([exe], cwd=os.path.dirname(exe), startupinfo=si)
+    # 一起进程就挂上隐藏线程：只设 STARTUPINFO 挡不住软件自己调 ShowWindow。
+    p.hidden_keeper = HideKeeper(p.pid).start() if hidden else None
     time.sleep(4)
     return p
+
+
+class HideKeeper:
+    """80 ms 轮询，把该 pid 的可见顶层窗口全部 ShowWindow(h, 0)。
+
+    只处理这一个 pid：用户可能自己开着另一个 XPSPEAK41 实例（实测遇到过），不能连带隐藏。
+    顺带当观测器：它记下「每次被迫隐藏的 (时间, 句柄)」——静默态下窗口不可见，
+    build 里那条靠可见性判断「新对话框出现了」的 wait_new 就失效，改由这份记录判断。
+    """
+
+    def __init__(self, pid, interval=HIDE_POLL_S):
+        self.pid, self.interval = pid, interval
+        self.hidden = []                 # [(ts, hwnd)] 按发生顺序
+        self.hide_calls = 0
+        self._stop = threading.Event()
+        self._t = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._t.start()
+        return self
+
+    def stop(self, join=True):
+        self._stop.set()
+        if join and self._t.is_alive():
+            self._t.join(timeout=1.0)
+
+    def poll_once(self):
+        """扫一遍并隐藏该 pid 的可见顶层窗口，返回本次隐藏了几个（单测直接调这个）。"""
+        n = 0
+        for h in tops(self.pid):
+            if u.IsWindowVisible(h):
+                u.ShowWindow(h, SW_HIDE)
+                self.hidden.append((time.time(), h))
+                self.hide_calls += 1
+                n += 1
+        return n
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                self.poll_once()
+            except Exception:
+                pass                         # 窗口随时可能销毁，枚举期间消失不算错误
+            self._stop.wait(self.interval)
+
+    def titles(self):
+        return [text(h) for _, h in self.hidden]
+
+
+def stop_keeper(p):
+    k = getattr(p, "hidden_keeper", None)
+    if k is not None:
+        k.stop()
+
+
+def wait_new(pid, before, timeout=10.0, keeper=None, since=None):
+    """等一个「之前不可见、现在可见」的窗体 —— XPSPeak 的对话框都是预先建好再 Show 的，
+    所以不能按句柄是否存在判断，只能比可见性。
+
+    keeper 非空（静默模式）时改看隐藏线程的记录：它 80 ms 内一定抓到那次 Show。
+    这时必须用 since（点菜单之前取的时间戳）而不是本函数入口时间——对话框在
+    menu_click 的 settle(1.5 s) 内就出现又被隐藏了，等本函数开始找时早过去了。
+    另外要排掉分峰主窗体：它没有新出现、但会随机被重新 Show 一次（实测 +1.5 s 那次），
+    它有菜单；对话框没有，用 GetMenu 区分最稳。
+    """
+    t0 = time.time()
+    floor = t0 if since is None else since
+    while time.time() - t0 < timeout:
+        if keeper is not None:
+            cand = [h for ts, h in keeper.hidden
+                    if ts >= floor - 0.3 and cls(h) == "ThunderRT6FormDC"
+                    and not u.GetMenu(h)]
+        else:
+            cand = [h for h in tops(pid)
+                    # 只认 VB6 窗体：ComboLBox 之类的弹出列表也会「新可见」，抢到它就会找不到控件
+                    if u.IsWindowVisible(h) and h not in before and cls(h) == "ThunderRT6FormDC"]
+        if cand:
+            return cand[-1]
+        time.sleep(HIDE_POLL_S if keeper is not None else 0.2)
+    return None
 
 
 def proc_name(pid):
@@ -337,16 +416,17 @@ def inventory(pid):
             print("   CH", k, repr(t), ("x%d" % n) if n > 1 else "")
 
 
-def export(exe, src, out, import_ascii=False):
+def export(exe, src, out, import_ascii=False, hidden=False):
     """打开(或导入)谱图 -> Data>Export(Spectrum) 导出 ASCII。返回写出的字节数。
 
     注意：传给文件对话框的路径必须是反斜杠形式，正斜杠会被 Save 对话框拒绝（对话框不关、也写不出文件）。
+    hidden=True 走静默模式（启动 SW_HIDE + 隐藏线程），实测导出字节与可见模式逐字节相同。
     """
     src, out = os.path.normpath(src), os.path.normpath(out)
     inp = work_path("in" + os.path.splitext(src)[1])
     shutil.copy(src, inp)
     if os.path.exists(out): os.remove(out)
-    p = launch(exe)
+    p = launch(exe, hidden=hidden)
     try:
         pid = p.pid
         proc, fit = form(pid, FORM_PROC), form(pid, FORM_FIT)
@@ -362,6 +442,7 @@ def export(exe, src, out, import_ascii=False):
         time.sleep(0.5); _kill_strays(pid)          # "Data file exported"
         return os.path.getsize(out) if os.path.exists(out) else 0
     finally:
+        stop_keeper(p)
         p.terminate()
 
 
@@ -380,7 +461,8 @@ if __name__ == "__main__":
         raise SystemExit(__doc__)
 
 
-def build(exe, src, peaks, out_xps, out_spec=None, out_par=None, background=None, bg_type=None):
+def build(exe, src, peaks, out_xps, out_spec=None, out_par=None, background=None, bg_type=None,
+          hidden=False):
     """一次调用：载谱 -> (扣背景) -> 逐个 Add Peak -> 导出谱图/参数 -> 存 .xps。
 
     peaks: [{"pos": 162.059, "fwhm": 0.952, "area": 53963.0, "gl": 30}, ...]
@@ -405,7 +487,8 @@ def build(exe, src, peaks, out_xps, out_spec=None, out_par=None, background=None
         if f and os.path.exists(f):
             os.remove(f)
     type_info = None
-    p = launch(exe)
+    p = launch(exe, hidden=hidden)
+    keeper = p.hidden_keeper
     try:
         pid = p.pid
         proc = form(pid, FORM_PROC)
@@ -422,8 +505,9 @@ def build(exe, src, peaks, out_xps, out_spec=None, out_par=None, background=None
         type_info = None
         if background:
             before = _vis(pid)
+            mark = time.time()
             menu_click(fit, "Background", None, settle=1.5)
-            dlg = wait_new(pid, before)
+            dlg = wait_new(pid, before, keeper=keeper, since=mark)
             if dlg is None:
                 raise TimeoutError("Background 对话框没出现")
             if bg_type is not None:
@@ -433,8 +517,9 @@ def build(exe, src, peaks, out_xps, out_spec=None, out_par=None, background=None
             click(button(dlg, "Accept"), settle=2.5)
         for pk in peaks:
             before = _vis(pid)
+            mark = time.time()
             menu_click(fit, "Add Peak", None, settle=1.5)
-            dlg = wait_new(pid, before)
+            dlg = wait_new(pid, before, keeper=keeper, since=mark)
             if dlg is None:
                 raise TimeoutError("Add Peak 对话框没出现（%s）" % text(fit))
             _fill(dlg, [(32, "%.4f" % float(pk["pos"])),
@@ -456,6 +541,7 @@ def build(exe, src, peaks, out_xps, out_spec=None, out_par=None, background=None
         time.sleep(1.0)
         _kill_strays(pid)
     finally:
+        stop_keeper(p)
         p.terminate()
     for f, name in ((out_xps, "xps"), (out_spec, "spectrum"), (out_par, "params")):
         if f and not os.path.exists(f):

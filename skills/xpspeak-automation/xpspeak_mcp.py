@@ -651,6 +651,26 @@ def build_quality(path, peaks, window=None, expect_bg=None, crop=True):
     res = F.assess_peaks(E, raw, bg, peaks, lo, hi)
     pf = F.preflight(res, E=res["curves"]["E"], bg_used=(expect_bg or "none"),
                      expect_bg=expect_bg, bg_col=bgcol)
+    # linear 背景的「适不适合」没有可用判据（第十二批 A 项实测最好只拉开 7.9×），
+    # 所以这里只发**警告**、不当闸：正常的两列 ASCII + linear 模板不能被堵死，
+    # 真正的拦截交给优度/残差/缺口。能说清的两件事必须说清：
+    #   ① 谱没有背景列 → 直线是按窗口两端现算的，没有独立参照；
+    #   ② 谱自带背景列 → 直接量它离两端直线多远，超 0.5% 峰高就把数写出来。
+    if expect_bg == "linear":
+        peak_h = float(res.get("peak_max") or 0.0) or 1.0
+        if not bgcol:
+            pf["warnings"].append(
+                "⚠ 本谱没有自带背景列（只读到 %d 列）：直线背景是按窗口两端现算的，没有独立参照 —— "
+                "优度只证明模型自洽，不证明直线适合这条谱。若背景呈台阶形，请改用 shirley 模板或 file（谱自带背景），"
+                "并用 audit 的 bg-shape 复核。" % ncol)
+        else:
+            chord = F.linear_bg(E, raw)
+            dev = max(abs(bgcol[i] - chord[i]) for i in range(len(E)))
+            pct = 100.0 * dev / peak_h
+            if pct > 0.5:
+                pf["warnings"].append(
+                    "⚠ 谱自带的 Background 列与窗口两端直线最大偏离 %.0f cps = 扣背景峰高 %.1f%%（容差 0.5%%）："
+                    "这条谱的实测背景不是直线，linear 只是近似。可改用 shirley 模板，或用 audit 的 bg-shape 复核。" % (dev, pct))
     return res, pf
 
 

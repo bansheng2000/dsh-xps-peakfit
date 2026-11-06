@@ -2215,6 +2215,52 @@ check('G3 源码顺序与 schema：build_quality 在 D.build 之前，工具含 
   assert.ok(MCP_SRC.includes('forced: true（未过门槛'), 'force 回包必须带可核对的 forced 行');
 });
 
+check('G4 linear 背景的两条警告：2 列谱没有独立参照；带背景列偏离超 0.5% 要写数值（都不阻断）', () => {
+  if (!pyForGuards) {
+    process.stdout.write('  skip 找不到 python，跳过 linear 背景警告\n');
+    return;
+  }
+  const out = JSON.parse(runPy(`
+import json, os, sys, tempfile
+sys.path.insert(0, 'server')
+import xps_fit as F, xpspeak_mcp as M
+E = [884.0 - 0.1 * i for i in range(391)]
+peaks = [dict(pos=852.884, fwhm=1.6, area=180000.0, gl=0)]
+model = [0.0] * len(E)
+for pk in peaks:
+    af = F.area_factor(pk["gl"] / 100.0)
+    h = pk["area"] / (pk["fwhm"] * af)
+    for i, e in enumerate(E):
+        model[i] += F.gl(e, pk["pos"], pk["fwhm"], h, pk["gl"] / 100.0)
+base = [5200.0 + (3000.0 - 5200.0) * (E[0] - e) / (E[0] - E[-1]) for e in E]
+raw = [base[i] + model[i] for i in range(len(E))]
+p2 = os.path.join(tempfile.gettempdir(), "bq_lin_2col.dat")
+with open(p2, "w", encoding="utf-8", newline="\\n") as fh:
+    fh.write("BE Raw\\n")
+    for i in range(len(E)):
+        fh.write("%.4f %.3f\\n" % (E[i], raw[i]))
+res2, pf2 = M.build_quality(p2, peaks, [845.68, 866.90], "linear")
+stepbg = [base[i] + (3000.0 if E[i] > 860.0 else 0.0) for i in range(len(E))]
+p4 = os.path.join(tempfile.gettempdir(), "bq_lin_step.dat")
+with open(p4, "w", encoding="utf-8", newline="\\n") as fh:
+    fh.write("BE Raw PeakSum Background\\n")
+    for i in range(len(E)):
+        fh.write("%.4f %.3f %.3f %.3f\\n" % (E[i], raw[i], model[i], stepbg[i]))
+res4, pf4 = M.build_quality(p4, peaks, [845.68, 866.90], "linear")
+print(json.dumps({"ok2": pf2["ok"], "w2": pf2["warnings"],
+                  "ok4": pf4["ok"], "w4": pf4["warnings"], "err4": pf4["errors"]}))
+`));
+  assert.strictEqual(out.ok2, true, '警告不是闸：2 列谱不该被阻断 ' + JSON.stringify(out.w2));
+  assert.ok(out.w2.some((w) => w.includes('没有自带背景列')), JSON.stringify(out.w2));
+  assert.ok(out.w2.some((w) => w.includes('台阶')), '警告要说清什么时候该换 shirley/file：' + JSON.stringify(out.w2));
+  // 4 列谱这一档：偏离 0.5% 在第九批已经是 bg-shape 的硬闸（同一阈值、同一比较），
+  // 所以看到的是「警告带着具体数值 + 老闸阻断」，不是新警告单独阻断。
+  assert.strictEqual(out.ok4, false, '带背景列且偏离超 0.5% 时，第九批的 bg-shape 硬闸仍会阻断');
+  assert.ok(out.err4.some((e) => e.includes('背景形状不符')), JSON.stringify(out.err4));
+  assert.ok(out.w4.some((w) => /Background 列与窗口两端直线最大偏离 \d+ cps/.test(w)), JSON.stringify(out.w4));
+  assert.ok(out.w4.some((w) => w.includes('扣背景峰高')), '偏离要写成占峰高百分比：' + JSON.stringify(out.w4));
+});
+
 /* ───────── 结果 ───────── */
 
 if (failures.length > 0) {

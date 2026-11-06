@@ -1,5 +1,15 @@
 # 变更记录
 
+## 未发版修订（第九批：bg-shape 扩到 Shirley 与类型识别）
+
+版本仍 `2.8.0`。
+
+- **Shirley 模板不再整项 skip**：`lib/audit.js` 新增 `shirleyBg()`（与 `server/xps_fit.py:shirley_bg` 同源：12 次迭代、初始值钳在 min/max、高 BE→低 BE 累加），对 `background === 'shirley'` 的模板按文件自己的端点重算，再与 `Background` 列逐点比。对拍：三份实测导出谱（213/401/176 点）JS 与 Python 结果逐点最大差 `0.000e+0`。
+- **先量后定阈值**：三份谱的 Shirley 重算最大偏离 25 / 3 / 31 cps = 峰高 0.09% / 0.01% / 0.12%，取 `SHIRLEY_TOL = 0.005`（0.5%，约 4 倍余量）；换类型的偏离是 6.7%–11.3%，量级差 50 倍以上，不会被阈值混淆。
+- **类型不符与同类型被改动分开报**：模板声明 shirley、文件是直线 → 报「背景类型不符」并给两侧偏差；同类型被改动 → 报「同类型背景被改动」。`linear` 模板下若文件实际更像 Shirley，同样报类型不符。`tougaard`/`file` 等无法重算的类型 → skip 且 reason 写「不支持该背景类型的重算」。
+- 文档：`SKILL.md` 七项检查与第 7 条、`README.md` 校验链一段同步。
+- 自检 105 → 109（① Shirley 对 Shirley pass；② Shirley 对直线 fail；③ linear 对 Shirley fail 且点名背景类型；④ tougaard skip 且写不支持）；两处变异均真红。
+
 ## 未发版修订（第八批：建区背景口径与拟合统一）
 
 版本仍 `2.8.0`。

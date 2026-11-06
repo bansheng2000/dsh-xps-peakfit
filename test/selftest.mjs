@@ -1594,6 +1594,61 @@ print(json.dumps({'lin_ok': a['ok'], 'step_ok': b['ok'], 'step_dev': b['max_dev'
     'build 收尾必须核背景形状，不符即删掉刚写出的 .xps（不落盘）');
 });
 
+/* ───────── 13. 背景形状：Shirley 重算与类型识别 ───────── */
+
+process.stdout.write('\n[13] bg-shape：Shirley 重算（与 xps_fit 同源）与背景类型识别\n');
+
+const bgDir = runPy("import tempfile; print(tempfile.mkdtemp(prefix='xpsbg-'))").trim();
+process.env.XPS_BG_DIR = bgDir;
+
+runPy(`
+import os, sys
+sys.path.insert(0, 'server')
+import xps_fit as F
+d = os.environ['XPS_BG_DIR']
+E = [880 - 0.1 * i for i in range(301)]
+raw = [F.model_at(e, [870.0, 1.5, 20000.0], 1, 0.0, 0.0, 0.3)
+       + F.model_at(e, [860.0, 1.2, 8000.0], 1, 0.0, 0.0, 0.3) + 800 + (880 - e) * 30 for e in E]
+sh = F.shirley_bg(E, raw)
+n = len(E)
+line = [raw[0] + (raw[-1] - raw[0]) * i / (n - 1.0) for i in range(n)]
+for name, bg in (('shirley.dat', sh), ('line.dat', line)):
+    p = os.path.join(d, name)
+    with open(p, 'w', encoding='utf-8', newline=chr(10)) as fh:
+        fh.write('B.E.' + chr(9) + 'Raw Intensity' + chr(9) + 'Peak Sum' + chr(9) + 'Background' + chr(10))
+        for i, e in enumerate(E):
+            fh.write('%.4f%s%.4f%s%.4f%s%.4f%s' % (e, chr(9), raw[i], chr(9), raw[i], chr(9), bg[i], chr(10)))
+`);
+
+const bgTpl = (background) => ({ background, peak_windows: [], fit_window_ev: null, applicable_window_ev: null });
+const bgCheck = (name, background) => auditArtifacts({
+  spectrumPath: join(bgDir, name), peaksPath: null, template: bgTpl(background),
+}).checks.find((c) => c.id === 'bg-shape');
+
+check('① Shirley 模板 + Shirley 文件（背景由 xps_fit.shirley_bg 生成）→ pass', () => {
+  const c = bgCheck('shirley.dat', 'shirley');
+  assert.equal(c.status, 'pass', c.detail);
+  assert.match(c.detail, /shirley/i);
+});
+
+check('② Shirley 模板 + 背景被换成两端直线 → fail（类型或偏离）', () => {
+  const c = bgCheck('line.dat', 'shirley');
+  assert.equal(c.status, 'fail', c.detail);
+  assert.match(c.detail, /直线型背景|背景类型|偏离/);
+});
+
+check('③ linear 模板 + 文件里是 Shirley 背景 → fail 且点名「背景类型」', () => {
+  const c = bgCheck('shirley.dat', 'linear');
+  assert.equal(c.status, 'fail', c.detail);
+  assert.match(c.detail, /背景类型/);
+});
+
+check('④ tougaard 模板 → skip，reason 写明「不支持」', () => {
+  const c = bgCheck('shirley.dat', 'tougaard');
+  assert.equal(c.status, 'skip', c.detail);
+  assert.match(c.detail, /不支持/);
+});
+
 /* ───────── 结果 ───────── */
 
 if (failures.length > 0) {

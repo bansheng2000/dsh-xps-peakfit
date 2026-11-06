@@ -430,13 +430,22 @@ check('W3 schema：peak_windows[].eta 与 applicable_window_ev 的范围校验',
   ]) assert.equal(validateTemplate(bad).ok, false, JSON.stringify(bad));
 });
 
-check('W4 窗口适用性：谱窗 17.5 < 模板 40 → 拒绝；够宽 → 放行；读不到 → 只警告', () => {
+check('W4 窗口适用性：17.5 对 40 拒绝（message 带两个宽度）；39.8 放行+警告；36.0/35.9 判死；读不到只警告', () => {
   const t = { ...GOOD, applicable_window_ev: 40 };
-  const narrow = useInstruction(t, 'exec', { lo: 844.4, hi: 861.9 });
+  const narrow = useInstruction(t, 'exec', { lo: 844.1, hi: 861.6 }); // 17.5 eV
   assert.equal(narrow.ok, false, '窗口不够必须拒绝');
   assert.equal(narrow.code, 'window-too-narrow');
-  assert.match(narrow.message, /17\.5/, '拒绝理由要写实际窗口宽度');
-  assert.equal(useInstruction(t, 'exec', { lo: 830, hi: 875 }).ok, true);
+  assert.match(narrow.message, /40 eV/, 'message 要写模板标定宽度');
+  assert.match(narrow.message, /17\.50 eV/, 'message 要写本次实际宽度');
+  const near = useInstruction(t, 'exec', { lo: 844.1, hi: 883.9 }); // 39.8 eV
+  assert.equal(near.ok, true, '39.8 对 40 只差 0.2 eV，必须放行');
+  const w = near.instruction.warnings.join('\n');
+  assert.match(w, /39\.80 eV/, '放行时 warnings 要写实际宽度');
+  assert.match(w, /窄 0\.20 eV/, '放行时 warnings 要写窄了多少');
+  assert.match(w, /≥90%/, '容差口径要写明');
+  assert.equal(useInstruction(t, 'exec', { lo: 850, hi: 886 }).ok, false, '恰好 90%（36.0）判死');
+  assert.equal(useInstruction(t, 'exec', { lo: 850.1, hi: 886 }).ok, false, '35.9 判死');
+  assert.equal(useInstruction(t, 'exec', { lo: 830, hi: 875 }).ok, true, '45 比 40 宽，直接放行');
   const unknown = useInstruction(t, 'exec', null);
   assert.equal(unknown.ok, true, '拿不到谱就不能拦');
   assert.match(unknown.instruction.warnings.join('\n'), /未核对/);

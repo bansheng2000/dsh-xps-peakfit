@@ -2261,6 +2261,99 @@ print(json.dumps({"ok2": pf2["ok"], "w2": pf2["warnings"],
   assert.ok(out.w4.some((w) => w.includes('扣背景峰高')), '偏离要写成占峰高百分比：' + JSON.stringify(out.w4));
 });
 
+/* ── 第十四批 I1/I2：同源谱降 warn、runlog 未知字段 400 ── */
+
+const i1dir = join(tmp, 'i1');
+mkdirSync(i1dir, { recursive: true });
+const i1be = [];
+for (let i = 0; i < 200; i += 1) i1be.push(Number((880 - i * 0.1).toFixed(3)));
+const i1bg = i1be.map((x) => 500 + (880 - x) * 10);
+const i1comp = i1be.map((x) => gauss(x, 870, 1.65, 20000) + gauss(x, 875, 1.05, 8000));
+const i1fit = i1comp.map((v, i) => v + i1bg[i]);
+const i1raw = i1fit.map((v, i) => v + (i % 2 === 0 ? -0.3 : 0.3)); // 零均值残差：别把 fixture 自己的常数偏移算成系统性偏差
+const i1spec = writeSpec(join(i1dir, 'src_spec.dat'), { be: i1be, raw: i1raw, fit: i1fit, bg: i1bg });
+const i1peaks = join(i1dir, 'src_peaks.dat');
+writeFileSync(
+  i1peaks,
+  ['Peak\tPosition (eV)\tArea\tFWHM (eV)\t%GL (%)', '0\t870.000\t80000\t1.600\t30', '1\t875.000\t40000\t1.000\t30'].join('\n') + '\n',
+  'utf8',
+);
+// 模板就是由这条谱拟合出来的：峰位/FWHM/%GL 与 observed 完全一致、平移 0
+const i1tpl = {
+  ...b3tpl,
+  background: 'linear',
+  provenance: { source_file: i1spec },
+  peak_windows: [
+    { label: 'a', center_ev: 870, observed: { fwhm_ev: 1.6, gl_pct: 30 } },
+    { label: 'b', center_ev: 875, observed: { fwhm_ev: 1.0, gl_pct: 30 } },
+  ],
+};
+const i1sha = sha256(readFileSync(i1spec));
+const i1run = join(i1dir, 'run.json');
+writeFileSync(i1run, JSON.stringify({ createdAt: '2026-01-01T00:00:00.000Z', spectrumSha256: i1sha, artifacts: [] }), 'utf8');
+
+const i1a = auditArtifacts({ spectrumPath: i1spec, peaksPath: i1peaks, template: i1tpl, runPath: i1run });
+// 兜底判据：模板只记了文件名、来源谱被挪到别的目录（哈希拿不到），靠 basename + 平移 0
+const i1movedDir = join(i1dir, 'moved');
+mkdirSync(i1movedDir, { recursive: true });
+const i1moved = join(i1movedDir, 'src_spec.dat');
+writeFileSync(i1moved, readFileSync(i1spec));
+const i1tplNameOnly = { ...i1tpl, provenance: { source_file: 'D:/old/exp/src_spec.dat' } };
+const i1b = auditArtifacts({ spectrumPath: i1moved, peaksPath: i1peaks, template: i1tplNameOnly });
+// 非同源：换了文件名的另一条谱，峰位/FWHM 仍然照搬模板 → 必须 fail
+const i1otherTmp = writeSpec(join(i1dir, '_other_tmp.dat'), {
+  be: i1be, raw: i1raw.map((v) => v + 120), fit: i1fit.map((v) => v + 120), bg: i1bg.map((v) => v + 120),
+});
+const i1other = join(i1dir, 'other_spec.dat');
+writeFileSync(i1other, readFileSync(i1otherTmp));
+const i1c = auditArtifacts({ spectrumPath: i1other, peaksPath: i1peaks, template: i1tpl });
+
+const i2dir = join(tmp, 'i2');
+mkdirSync(i2dir, { recursive: true });
+const i2srv = createServer(createRoutes({ root, env: { ...process.env, XPSPEAK_ROOT: root, XPSPEAK_MODE: '', XPSPEAK_MODE_FILE: '' } }));
+await new Promise((resolve) => i2srv.listen(0, '127.0.0.1', resolve));
+const i2port = i2srv.address().port;
+const i2bad = await request(i2port, '/xps/runlog', {
+  method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dir: i2dir, artifacts: [] }),
+});
+const i2good = await request(i2port, '/xps/runlog', {
+  method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dir: i2dir, files: [], spectrumSha256: i1sha }),
+});
+await new Promise((resolve) => i2srv.close(resolve));
+
+check('I1 同源谱：模板由这条谱拟合得出 → template-copied 降 warn（判据写进 detail）', () => {
+  const c = i1a.checks.find((x) => x.id === 'template-copied');
+  assert.ok(c, JSON.stringify(i1a.checks));
+  assert.equal(c.status, 'warn', c.detail);
+  assert.match(c.detail, /同源谱/, c.detail);
+  assert.match(c.detail, /sha256/, 'detail 要写清用了哪条判据：' + c.detail);
+  assert.equal(i1a.verdict, 'warn', '同源复现不该整体判 fail：' + i1a.checks.map((c) => c.id + '=' + c.status + (c.status === 'fail' ? '(' + c.detail + ')' : '')).join(' | '));
+});
+
+check('I1b 同源兜底判据：只有文件名可比（basename + 平移≈0）也降 warn', () => {
+  const c = i1b.checks.find((x) => x.id === 'template-copied');
+  assert.equal(c.status, 'warn', c.detail);
+  assert.match(c.detail, /basename/, 'fallback 判据要写明：' + c.detail);
+});
+
+check('I1c 非同源照搬模板仍 fail（降级只对同源生效）', () => {
+  const c = i1c.checks.find((x) => x.id === 'template-copied');
+  assert.equal(c.status, 'fail', c.detail);
+  assert.match(c.detail, /不是拟合/);
+  assert.equal(i1c.verdict, 'fail');
+});
+
+check('I2 runlog 顶层键白名单：artifacts 这种错键必须 400 unknown-field，别静默写空数组', () => {
+  assert.equal(i2bad.status, 400, JSON.stringify(i2bad.json));
+  assert.equal(i2bad.json.code, 'unknown-field');
+  assert.match(i2bad.json.message, /artifacts/, '要说清哪个键不认识');
+  assert.match(i2bad.json.message, /files/, '要给出正确键名');
+  assert.ok(Array.isArray(i2bad.json.allowed) && i2bad.json.allowed.includes('spectrumSha256'), JSON.stringify(i2bad.json.allowed));
+  assert.equal(i2good.status, 200, JSON.stringify(i2good.json));
+  const run = JSON.parse(readFileSync(join(i2dir, 'run.json'), 'utf8'));
+  assert.equal(run.spectrumSha256, i1sha, 'run.json 必须记下审计谱的 sha256（同源判据要靠它）');
+});
+
 /* ───────── 结果 ───────── */
 
 if (failures.length > 0) {

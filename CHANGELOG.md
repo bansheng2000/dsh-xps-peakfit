@@ -1,5 +1,15 @@
 # 变更记录
 
+## 未发版修订（第十四批：同源谱降 warn、runlog 键名白名单）
+
+版本仍 `2.8.0`。
+
+- **I1 同源谱降级**（`lib/audit.js`）：`template-copied` 原来对模板自己的来源谱也判 fail —— 同一份谱跑自己的模板，FWHM/峰位本来就不会动，这会把正常复现说成造假。现在先判同源：① `run.json.spectrumSha256` 与模板 `provenance.source_file` 来源谱的哈希一致；② 没有 run 时直接比审计谱与来源谱哈希；③ 都拿不到哈希时用「basename 相同 + 峰位平移 ≈0」兜底。同源 → `warn`，detail 写明「同源谱：模板即由该谱拟合得出，属模板复现（判据：…）」；非同源照搬仍 `fail`。
+- **I2 runlog 键名白名单**（`lib/routes.js`）：只认 `files`，此前传 `artifacts` 会被静默忽略并写出空数组。现在顶层键走白名单（`dir`/`files`/`templateId`/`fit`/`result`/`chargeCorrection`/`forced`/`preflight`/`overwrite`/`spectrumSha256`），未知键 400 `unknown-field`，message 列出允许键并点明「产物列表的键名是 files，不是 artifacts」；新增 `spectrumSha256`（64 位十六进制校验），写进 `run.json` 供同源判据使用。
+- 自检 130 → 134（I1 / I1b / I1c / I2 四条）；先红三条（旧代码上 I1b、I2 与 I1 全红，I1c 是「非同源仍 fail」的守门断言，旧代码本来就 fail）。
+- 两处变异各真红：同源降级关掉（`same !== null` → `false &&`）→ I1/I1b 红；runlog 未知字段不再拒绝 → I2 红。
+- `lib/client.js` 另修一处侧栏空白：`runAudit` 的 `const` 定义在 `const header` 之后，而 header 的「审计这份」按钮先引用它 → 渲染第一步抛 TDZ `ReferenceError`，整页空白。把 `runAudit` 整块移到 `header` 之前（内部改用 `state.selection?.templateId ?? null`）。
+
 ## 未发版修订（第十三批：linear 背景在 build 预检里发警告，不当闸）
 
 版本仍 `2.8.0`。

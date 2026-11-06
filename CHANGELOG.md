@@ -16,6 +16,8 @@
 - **B3 向后兼容**：`use` 路由保留，面板「用这个」降为次要按钮；教学档两处禁用 + 服务端 403。
 - 自检 57 → 67 项（新增 selection 四条、⑧–⑪ 四条、客户端契约两条）；`sync_skills.py` 仍管 7 个文件。
 - **校验链（第一批）**：`preflight` 扩到七条 —— 新增「未优化参数（初值=终值且不在界上，阻断）」「R²<0.85 阻断 / <0.90 警告」「残差四段任一段 >0.5×rms 阻断（系统性偏移）」「峰顶缺口 >10% 阻断 / >5% 警告」「linear 模板下导出谱 Background 列偏离两端直线 >0.5% 峰高 → 阻断（build 侧删掉刚写出的 .xps，不落盘）」。阈值常量与依据见 `SKILL.md`「保存前的校验链」；自检 67 → 72 项（⑫–⑯ 五条）。
+- **逐峰 eta 正式化（第二批）**：`peak_windows[].eta`（0–1，可选）进 schema；`useInstruction` 只从这里取逐峰 eta，`observed.gl_pct` 退回纯对照 —— 修掉「代码用 observed 进拟合、文档又说 observed 绝不进拟合」的自相矛盾。老模板没有该字段时回落模板标量（提示写进 notes），不拦。
+- **窗口适用性（第二批）**：新增顶层 `applicable_window_ev`（>0，可选）。`POST /xps/templates/<id>/use` 收可选 `spectrumPath`（缺省用选择态里那份），读首列范围；谱窗比模板窄 → 422 `window-too-narrow`（写明两边宽度），够宽放行；读不出范围只给 warnings「未核对」。`lib/routes.js:spectrumRange()` 只读首列、不参与拟合。自检 72 → 77 项（W1–W5）。
 
 ## v2.8.0（未发版）：插件壳 + 模板页
 

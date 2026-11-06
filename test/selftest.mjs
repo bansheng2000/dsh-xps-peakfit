@@ -391,6 +391,84 @@ check('④ observed 只作对照，绝不进 fit 参数（面积比不固定是�
   assert.equal(ins.fields.peak_windows[0].observed.share_pct, 62, 'observed 必须原样带进 fields 供对照');
 });
 
+/* ── 第二批：逐峰 eta 正式化 / 窗口适用性 ── */
+
+check('W1 逐峰 eta 读 peak_windows[].eta；observed.gl_pct 不再进拟合', () => {
+  const t = {
+    ...GOOD,
+    eta: 0.3,
+    peak_windows: [
+      { label: 'a', center_ev: 229.0, eta: 0.48, observed: { gl_pct: 64 } },
+      { label: 'b', center_ev: 232.1, eta: 1.0 },
+      { label: 'c', center_ev: 235.0 },
+    ],
+  };
+  const ins = useInstruction(t, 'exec').instruction;
+  const eta = ins.steps.find((s) => s.tool === 'xpspeak_fit').arguments.eta;
+  assert.deepEqual(eta, [0.48, 1, 0.3], '逐峰 eta 必须取 peak_windows[].eta，缺的回落模板标量');
+  assert.notEqual(eta[0], 0.64, 'observed.gl_pct 不许再进拟合（它只作对照）');
+  assert.match(ins.notes.join('\n'), /peak_windows\[\]\.eta/, 'notes 要指向逐峰 eta 字段');
+});
+
+check('W2 老模板（只有标量 eta）→ 仍按标量拟合，notes 说明没有逐峰值', () => {
+  const ins = useInstruction({ ...GOOD, eta: 0.45 }, 'exec').instruction;
+  const fit = ins.steps.find((s) => s.tool === 'xpspeak_fit');
+  assert.equal(fit.arguments.eta, 0.45);
+  assert.match(ins.notes.join('\n'), /标量/, 'notes 要说明本次用的是模板标量');
+});
+
+check('W3 schema：peak_windows[].eta 与 applicable_window_ev 的范围校验', () => {
+  const ok = validateTemplate({ ...GOOD, applicable_window_ev: 40, peak_windows: [{ label: 'a', center_ev: 229, eta: 0.5 }] });
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+  assert.equal(ok.template.applicable_window_ev, 40);
+  assert.equal(ok.template.peak_windows[0].eta, 0.5);
+  for (const bad of [
+    { ...GOOD, peak_windows: [{ label: 'a', center_ev: 229, eta: 1.5 }] },
+    { ...GOOD, peak_windows: [{ label: 'a', center_ev: 229, eta: -0.1 }] },
+    { ...GOOD, applicable_window_ev: 0 },
+    { ...GOOD, applicable_window_ev: -3 },
+  ]) assert.equal(validateTemplate(bad).ok, false, JSON.stringify(bad));
+});
+
+check('W4 窗口适用性：谱窗 17.5 < 模板 40 → 拒绝；够宽 → 放行；读不到 → 只警告', () => {
+  const t = { ...GOOD, applicable_window_ev: 40 };
+  const narrow = useInstruction(t, 'exec', { lo: 844.4, hi: 861.9 });
+  assert.equal(narrow.ok, false, '窗口不够必须拒绝');
+  assert.equal(narrow.code, 'window-too-narrow');
+  assert.match(narrow.message, /17\.5/, '拒绝理由要写实际窗口宽度');
+  assert.equal(useInstruction(t, 'exec', { lo: 830, hi: 875 }).ok, true);
+  const unknown = useInstruction(t, 'exec', null);
+  assert.equal(unknown.ok, true, '拿不到谱就不能拦');
+  assert.match(unknown.instruction.warnings.join('\n'), /未核对/);
+  assert.match(
+    useInstruction({ ...GOOD }, 'exec', { lo: 830, hi: 875 }).instruction.warnings.join('\n'),
+    /未标 applicable_window_ev/,
+    '老模板缺字段只警告，不拦',
+  );
+});
+
+const w5SpecNarrow = join(tmp, 'w5-narrow.txt');
+const w5SpecWide = join(tmp, 'w5-wide.txt');
+writeFileSync(w5SpecNarrow, '# BE  intensity\n844.4  100\n850  500\n861.9  120\n', 'utf8');
+writeFileSync(w5SpecWide, '830  10\n850  500\n875  20\n', 'utf8');
+const w5Created = createTemplate({ ...GOOD, applicable_window_ev: 40 }, root);
+const w5Srv = createServer(createRoutes({ root, env: { ...process.env, XPSPEAK_ROOT: root, XPSPEAK_MODE: '', XPSPEAK_MODE_FILE: '' } }));
+await new Promise((resolve) => w5Srv.listen(0, '127.0.0.1', resolve));
+const w5Port = w5Srv.address().port;
+const w5Bad = await request(w5Port, `/xps/templates/${w5Created.template.id}/use`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ spectrumPath: w5SpecNarrow }) });
+const w5Good = await request(w5Port, `/xps/templates/${w5Created.template.id}/use`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ spectrumPath: w5SpecWide }) });
+await new Promise((resolve) => w5Srv.close(resolve));
+removeTemplate(w5Created.template.id, root);
+
+check('W5 HTTP：POST /templates/<id>/use 带谱图路径，窗口不足 → 422 window-too-narrow', () => {
+  assert.equal(w5Created.ok, true, JSON.stringify(w5Created.errors));
+  assert.equal(w5Bad.status, 422, JSON.stringify(w5Bad.json));
+  assert.equal(w5Bad.json.code, 'window-too-narrow');
+  assert.match(w5Bad.json.message, /17\.5/, '拒绝理由要写实际窗口宽度');
+  assert.equal(w5Good.status, 200, JSON.stringify(w5Good.json));
+  assert.equal(w5Good.json.ok, true);
+});
+
 check('⑤ 详情表：卡片能开详情，含 GL 与「模板值 vs 实测值」两列', () => {
   const src = readFileSync(join(REPO, 'lib', 'client.js'), 'utf8');
   assert.match(src, /模板值[\s\S]{0,40}实测值/, '详情表必须有模板值/实测值两列');

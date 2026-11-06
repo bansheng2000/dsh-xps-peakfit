@@ -520,8 +520,9 @@ def do_build(a):
         except ValueError as exc:
             try:                                   # 不落盘：刚写出的 .xps 立刻删掉
                 os.remove(out)
-            except OSError:
-                pass
+            except OSError as rm_exc:
+                raise ValueError("%s（⚠ 本次写出的 %s 删除失败（%s）：盘上仍有一份背景不符的 .xps，请手动删）"
+                                 % (exc, out, rm_exc))
             raise ValueError("%s（已删除本次写出的 %s）" % (exc, out))
         if bg_ok:
             txt += "\n背景形状: 直线（最大偏离 %.0f cps，容差 %.0f cps）" % (bg_ok["max_dev"], bg_ok["limit"])

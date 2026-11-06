@@ -229,12 +229,13 @@ whenToUse: 用户给出 XPS 数据（全谱和/或高分辨谱），要求做荷
    | `constraints.area_ratio` | `xpspeak_fit.ratio` |
    | `fwhm_min` / `fwhm_max` | `xpspeak_fit.wlo` / `whi` |
    | `background` | `xpspeak_fit.bg`：`shirley`→`shirley`、`linear`→`linear`、`tougaard`→`file`（fit 没有 tougaard 项，退回谱图自带背景，并在产物里写明） |
-   | `eta`（0–1，%Lorentzian） | `xpspeak_fit.eta`（缺省 0.3 只是老模板回落值；三份实测谱主峰 %GL 45–48%、卫星 100%，能填就填） |
+   | `eta`（0–1，%Lorentzian） | `xpspeak_fit.eta`：**逐峰优先**取 `peak_windows[].eta`，没写的峰回落模板标量（缺省 0.3 只是老模板回落值；三份实测谱主峰 %GL 45–48%、卫星 100%，能填就填） |
+   | `applicable_window_ev`（>0） | **不是工具参数**：模板标定时的窗口宽度；目标谱窗口（高−低）比它窄 → `use` 直接 422 `window-too-narrow`，不许套用 |
    | `peak_windows[].search_ev` | `xpspeak_fit.ctol`（峰位初值允许移动的半宽）**只能给一个标量**：取各峰 `search_ev` 的最大值；一个都没有 → 回落 1.0 eV |
    | `charge_correction_ev`、`reference_peak` | **不传参**，只写进报告（「已按 C 1s 284.6 eV 校正」这类信息） |
-   | `provenance`、`peak_windows[].observed` | **不传参**，只用于显示与换样品对照（`observed` 是这一次的实测值：峰位/宽/%GL/面积/占比） |
+   | `provenance`、`peak_windows[].observed` | **不传参**，只用于显示与换样品对照（`observed` 是这一次的实测值：峰位/宽/%GL/面积/占比）。要让它影响拟合，必须显式写该峰的 `peak_windows[].eta` |
 
-   **`warnings` 是提醒不是错误**：模板没写 `eta` 时 `use` 仍返回 200，但 `instruction.warnings` 非空（「已按 0.3 拟合，实测 %GL 不同的谱请补 eta」）——见到就补 `eta` 再拟合，别装作没看见。
+   **`warnings` 是提醒不是错误**：模板没写 `eta` 时 `use` 仍返回 200，但 `instruction.warnings` 非空（「已按 0.3 拟合，实测 %GL 不同的谱请补 eta」）——见到就补 `eta` 再拟合，别装作没看见。模板写了 `applicable_window_ev` 但请求里没带谱图路径、或谱图读不出范围时，也只给 warnings（「未核对」）；老模板没写这个字段、而这次带了谱图时，同样只给 warnings（「未标 applicable_window_ev」）。一旦拿到窗口且不足，就是 422 拒绝，不是警告。
 
    **不映射面积、不映射峰高**：模板里没有这两个字段，别自己造经验值；`observed.area` / `observed.share_pct` 也只是参照，**不得**变成 `ratio` 或任何固定约束。
 4. **`search_ev` 是窗口半宽 → `ctol`**：用来判「拟合峰跑出窗口 → 报错停下」，不是用来固定峰位；模板只存一个标量，取各峰最大值（`xpspeak_fit` 不收数组）。峰位在 `centers` 里只是初值，第 3 步的初值可复现性照常做。
@@ -246,8 +247,8 @@ whenToUse: 用户给出 XPS 数据（全谱和/或高分辨谱），要求做荷
 用户只说一句「按模板做 / 用这个模板」，agent 自己读完再动手，不回头问第二遍参数。
 
 1. **先读选择态**：`~/.dsh/dsh-xps-peakfit/selection.json`（面板「选这个」写入；`GET /xps/selection` 读同一份）→ `{templateId, spectrumPath, updatedAt, lastRun}`。`templateId` 为 null 或模板已删 → 请用户在面板点「选这个」（连同谱图路径一起填），不要自己猜模板、也不要随手挑一个收藏项代替。
-2. **一次取齐参数**：模板字段按上节映射表转成 `xpspeak_fit` 参数；逐峰 `eta` 取 `peak_windows[i].observed.gl_pct/100`（没有才回落模板 `eta`），`ctol = 各峰 search_ev 的最大值`，`bg` 按 `background` 映射。
-3. **执行顺序**：`xpspeak_open`（`spectrumPath`）→ `xpspeak_fit`。档位闸门照旧：教学档停在手工四步，不许代执行。
+2. **一次取齐参数**：模板字段按上节映射表转成 `xpspeak_fit` 参数；逐峰 `eta` 取 `peak_windows[i].eta`（没有才回落模板 `eta`；`observed.gl_pct` 只作对照，不进拟合），`ctol = 各峰 search_ev 的最大值`，`bg` 按 `background` 映射。
+3. **执行顺序**：`xpspeak_open`（`spectrumPath`）→ `xpspeak_fit`。档位闸门照旧：教学档停在手工四步，不许代执行。模板写了 `applicable_window_ev` 而本次谱窗更窄时，`use` 会直接 422 —— 不许绕过（峰形与边界截断都不可比），换同宽窗口或另建该宽度的模板。
 4. **硬前置拦住就不许落盘**：撞界（`res.bound` 非空）、背景不一致、峰心距谱端 < 3×FWHM 的截断警告——**任一出现就停下**，不 `xpspeak_export`、不 `xpspeak_save`，把原因写回 `selection.lastRun`（`POST /xps/selection` 带 `lastRun`，`templateId`/`spectrumPath` 保持原值），再如实报给用户。
 5. **全过才交付**：`xpspeak_export` → `xpspeak_save`，然后把峰表（中心 / FWHM / 面积 / 占比 / ±σ）与来源（谱图路径、模板名、生成的文件）写回 `lastRun`。
 6. **教学档**：`POST /xps/selection` 返回 403 `teaching-mode`，面板按钮同样禁用；此时改手工四步、把模板字段念给用户听，不许悄悄切档或换通道绕过。

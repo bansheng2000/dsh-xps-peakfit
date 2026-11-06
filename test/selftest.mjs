@@ -582,7 +582,8 @@ check('X3 审计认出 Fake 拟合与台阶背景：fit 差 10% + 背景列不�
 check('X4 解析器只认文本导出：坏文件抛错，不静默给空结果', () => {
   const bad = join(b3dir, 'bad.dat');
   writeFileSync(bad, 'not a spectrum\n', 'utf8');
-  assert.throws(() => parseSpectrum(bad), /行数不足/);
+  // 「没有数字列」必须报列数，不能再说「行数不足 0 行」（2 列谱曾因此被误判为空文件）
+  assert.throws(() => parseSpectrum(bad), /列数不足/);
   const ok = parseSpectrum(b3spec);
   assert.equal(ok.rows, 200);
   const pk = parsePeaks(b3peaks);
@@ -683,6 +684,66 @@ check('X8 /xps/runlog：写 run.json，产物 sha256 可复核；教学档 403',
   assert.match(runJson.createdAt, /^\d{4}-\d{2}-\d{2}T/);
 });
 
+// ---- 第六批：runlog 幂等 + 2 列/缺背景列的谱 ----
+const runlogAgain = await request(b3port, '/xps/runlog', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    dir: b3dir,
+    templateId: b3created.template.id,
+    fit: { ds: 0, ratio: 1, wlo: 0.6, whi: 1.6 },
+    result: { r2: 0.5 },
+    files: [b3spec, b3peaks],
+    chargeCorrection: selRead.json.selection.chargeCorrection,
+  }),
+});
+const after409 = existsSync(runFile) ? JSON.parse(readFileSync(runFile, 'utf8')) : null;
+await new Promise((resolve) => setTimeout(resolve, 5));
+const runlogOver = await request(b3port, '/xps/runlog', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ dir: b3dir, files: [], overwrite: true }),
+});
+const runOverJson = existsSync(runFile) ? JSON.parse(readFileSync(runFile, 'utf8')) : null;
+
+const twoColPath = join(b3dir, 'two_col.dat');
+{
+  const lines = ['B.E.(eV)\tIntensity'];
+  for (let i = 0; i < 60; i++) lines.push(`${(900 - i * 0.1).toFixed(1)}\t${1000 + 10 * i}`);
+  writeFileSync(twoColPath, lines.join('\n'), 'utf8');
+}
+const threeColPath = join(b3dir, 'three_col_nobg.dat');
+{
+  const lines = ['B.E.(eV)\tRaw Intensity\tPeak Sum'];
+  for (let i = 0; i < 60; i++) {
+    const raw = 1000 + 10 * i + 5 * Math.sin(i);
+    lines.push(`${(900 - i * 0.1).toFixed(1)}\t${raw.toFixed(6)}\t${(raw - 3).toFixed(6)}`);
+  }
+  writeFileSync(threeColPath, lines.join('\n'), 'utf8');
+}
+const twoColPeaks = join(b3dir, 'two_col_peaks.dat');
+writeFileSync(twoColPeaks, 'Peak\tPosition (eV)\tArea\tFWHM (eV)\t%GL\n1\t897.0\t100\t1.200\t30\n2\t894.0\t80\t1.100\t30\n', 'utf8');
+const oneColPath = join(b3dir, 'one_col.dat');
+writeFileSync(oneColPath, ['B.E.(eV)', ...Array.from({ length: 60 }, (_, i) => String(900 - i * 0.1))].join('\n'), 'utf8');
+
+const tryCall = (fn) => {
+  try { return { ok: true, value: fn() }; } catch (e) { return { ok: false, err: String(e?.message ?? e) }; }
+};
+const twoColParse = tryCall(() => parseSpectrum(twoColPath));
+const twoColAudit = tryCall(() => auditArtifacts({ spectrumPath: twoColPath }));
+const threeColAudit = tryCall(() => auditArtifacts({ spectrumPath: threeColPath }));
+const oneColParse = tryCall(() => parseSpectrum(oneColPath));
+const auditTwo = await request(b3port, '/xps/audit', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ spectrumPath: twoColPath, peaksPath: twoColPeaks }),
+});
+const auditOne = await request(b3port, '/xps/audit', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ spectrumPath: oneColPath, peaksPath: twoColPeaks }),
+});
+
 writeFileSync(join(root, 'mode.json'), '{"mode":"teach"}', 'utf8');
 const runlogTeach = await request(b3port, '/xps/runlog', {
   method: 'POST',
@@ -696,6 +757,45 @@ removeTemplate(b3created.template.id, root);
 check('X9 教学档：/xps/runlog 也 403（不能被当成「只是写个日志」绕过）', () => {
   assert.equal(runlogTeach.status, 403, JSON.stringify(runlogTeach.json));
   assert.equal(runlogTeach.json.code, 'teaching-mode');
+});
+
+check('Z1 /xps/runlog 已有 run.json → 409 runlog-exists（旧 createdAt 原样带回、409 不落盘）；overwrite:true 才覆盖', () => {
+  assert.equal(runlogAgain.status, 409, JSON.stringify(runlogAgain.json));
+  assert.equal(runlogAgain.json.code, 'runlog-exists');
+  assert.equal(runlogAgain.json.run.createdAt, runJson.createdAt, '旧 createdAt 必须原样带回');
+  assert.equal(after409.createdAt, runJson.createdAt, '409 不能改盘上的 run.json');
+  assert.equal(runlogOver.status, 200, JSON.stringify(runlogOver.json));
+  assert.notEqual(runOverJson.createdAt, runJson.createdAt, 'overwrite:true 必须重写 createdAt');
+});
+
+check('Z2 2 列谱（BE + 强度）可解析：bg/fit 为 null，fit-quality skip 且标「无背景列」，bg-shape skip', () => {
+  assert.equal(twoColParse.ok, true, twoColParse.err);
+  assert.equal(twoColParse.value.rows, 60);
+  assert.equal(twoColParse.value.bg, null);
+  assert.equal(twoColParse.value.fit, null);
+  assert.equal(twoColAudit.ok, true, twoColAudit.err);
+  const fq = twoColAudit.value.checks.find((c) => c.id === 'fit-quality');
+  assert.equal(fq.status, 'skip', JSON.stringify(fq));
+  assert.match(fq.detail, /无背景列/, '2 列谱要明说没有背景列，不能只说行数');
+  assert.equal(twoColAudit.value.checks.find((c) => c.id === 'bg-shape').status, 'skip');
+  assert.equal(auditTwo.status, 200, JSON.stringify(auditTwo.json));
+});
+
+check('Z3 3 列但缺 Background：R² 只算 raw 口径并标注，bg-shape skip', () => {
+  assert.equal(threeColAudit.ok, true, threeColAudit.err);
+  const fq = threeColAudit.value.checks.find((c) => c.id === 'fit-quality');
+  assert.notEqual(fq.status, 'skip', '有 Peak Sum 就该真算 R²');
+  assert.match(fq.detail, /无背景列/, '缺背景列要标注口径');
+  assert.match(fq.detail, /R²/);
+  assert.equal(threeColAudit.value.checks.find((c) => c.id === 'bg-shape').status, 'skip');
+});
+
+check('Z4 列数不足（1 列）：报列数并写明需要 2 列或 XPSPeak 导出，不报「行数不足」', () => {
+  assert.equal(oneColParse.ok, false, '单列谱必须拒绝');
+  assert.match(oneColParse.err, /列/, `错误文案要看得出是列数问题：${oneColParse.err}`);
+  assert.equal(auditOne.status, 400, JSON.stringify(auditOne.json));
+  assert.match(auditOne.json.message, /列/);
+  assert.match(auditOne.json.message, /2 列/);
 });
 
 check('X10 客户端「审计这份」：调 /audit、传两条路径与模板、教学档禁用', () => {

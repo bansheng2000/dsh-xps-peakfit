@@ -1,5 +1,13 @@
 # 变更记录
 
+## 未发版修订（第六批：交付凭证防覆盖 / 2 列谱可审）
+
+版本仍 `2.8.0`。
+
+- **`POST /xps/runlog` 已存在即 409**：`lib/routes.js` 在 `writeFileSync` 之前检 `run.json`，存在且 `body.overwrite !== true` 时返回 409 `runlog-exists`，响应体带 `run`（旧内容）与 `path`；不会再静默把 `createdAt` 覆盖掉。确要重写必须显式 `overwrite: true`。
+- **审计接受 2 列谱**：`lib/audit.js:numericRow` 改为至少 1 列就收下、`parseSpectrum` 记 `columns`；≥2 列即合法（2 列 = B.E.+ 强度，`bg`/`fit` 为 `null`）。`fit-quality` 在无 `Peak Sum` 时判 `skip` 并明写「无背景列」，`bg-shape` 判 `skip`，`peak-gap`/残差不受影响。列数 <2 时报「谱图列数不足（读到 N 列）」，不再把列数问题误报成「行数不足 0 行」。
+- 自检 95 → 99（Z1 runlog 409 / Z2 2 列谱 / Z3 3 列缺背景 / Z4 列数报错），三处变异均真红。
+
 `SKILL.md` 正文只保留当前版本号与一行说明；完整历史记在这里（正文顶部原来那条约 1,800 字符的变更行已搬到此文件，避免每次触发都把它载入上下文）。
 
 ## 未发版修订（A1–A5 修缺陷 / B1–B3 一键化）

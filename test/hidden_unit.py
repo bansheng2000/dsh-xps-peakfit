@@ -140,6 +140,29 @@ def test_wait_new_hidden():
         D.HIDE_POLL_S = save_poll
 
 
+def test_clear_stale_exports():
+    """导出前清旧文件这一支必须真删（Chief 复验时把这里改成 pass，selftest 全绿——已补钉）。"""
+    import tempfile
+    import xpspeak_import as I
+    d = tempfile.mkdtemp(prefix="xpk-stale-")
+    a = os.path.join(d, "peaks.dat")
+    b = os.path.join(d, "spectrum.dat")
+    for p in (a, b):
+        with open(p, "w", encoding="ascii") as f:
+            f.write("stale\n")
+    gone = I.clear_stale_exports((a, b, os.path.join(d, "missing.dat")))
+    ok("旧导出文件要删掉", [os.path.exists(a), os.path.exists(b)] == [False, False],
+       "a=%s b=%s" % (os.path.exists(a), os.path.exists(b)))
+    ok("返回值只含真删掉的", gone == [a, b], "gone=%r" % (gone,))
+    ok("不存在的路径不算失败", I.clear_stale_exports((a,)) == [])
+    ok("run_gui 导出前真的调它", "clear_stale_exports((peaks_path, spec_path))" in open(
+        os.path.join(os.path.dirname(HERE), "server", "xpspeak_import.py"), encoding="utf-8").read())
+    for p in (a, b):
+        if os.path.exists(p):
+            os.remove(p)
+    os.rmdir(d)
+
+
 def test_defaults():
     import inspect
     sig = inspect.signature(D.launch)
@@ -157,6 +180,7 @@ def main():
     test_launch_flags()
     test_poll_once()
     test_wait_new_hidden()
+    test_clear_stale_exports()
     test_defaults()
     print(json.dumps({"ok": True, "checks": checks}, ensure_ascii=False))
 

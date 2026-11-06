@@ -283,6 +283,22 @@ def _error_dialog_text(D, pid):
     return "\n".join(texts)
 
 
+def clear_stale_exports(paths):
+    """导出前清掉工作目录里同名的旧导出文件，返回实际删掉的路径。
+
+    不删的话 XPSPeak 的 Export 对话框会因为你给的路径已存在而弹「覆盖?」，
+    静默态下这个框可能抢不到；而且旧文件留着会让人误以为是这次导出的。
+    注意：这里删的是**中间产物**（peaks.dat / spectrum.dat），不是用户上传的
+    源 `.xps`——那一份由插件路由在 finally 里用 cleanupImportArtifacts 删。
+    """
+    removed = []
+    for p in paths:
+        if p and os.path.exists(p):
+            os.remove(p)
+            removed.append(p)
+    return removed
+
+
 def run_gui(src, outdir, exe=None, hidden=True):
     """打开 .xps -> 导出 Peak Parameters 与 Spectrum。返回 (peaks_path, spec_path)。
 
@@ -297,9 +313,7 @@ def run_gui(src, outdir, exe=None, hidden=True):
         raise ScriptError("xpspeak-not-found", "找不到 XPSPEAK41.exe：%s（设 XPSPEAK_EXE 指向真实可执行文件）" % exe)
     peaks_path = os.path.join(outdir, "peaks.dat")
     spec_path = os.path.join(outdir, "spectrum.dat")
-    for p in (peaks_path, spec_path):
-        if os.path.exists(p):
-            os.remove(p)
+    clear_stale_exports((peaks_path, spec_path))
     p = D.launch(exe, hidden=hidden)
     try:
         pid = p.pid

@@ -1770,6 +1770,43 @@ print(json.dumps({'msg': msg, 'built': called['build'], 'exists': os.path.exists
   assert.equal(r.built, false, '不许先建出来再靠 audit 兜');
 });
 
+check('C 建区后的背景回读是真行为断言：导出谱 Background 整体偏移 → 抛错且盘上无 .xps', () => {
+  const out = runPy(`
+import json, os, sys, tempfile
+sys.path.insert(0, 'server')
+import xps_fit as F
+import xpspeak_mcp as M
+d = tempfile.mkdtemp()
+src = os.path.join(d, 'src.dat')
+E = [880 - 0.1 * i for i in range(201)]
+raw = [F.model_at(e, [870.0, 1.5, 20000.0], 1, 0.0, 0.0, 0.3) + 800 + (880 - e) * 20 for e in E]
+with open(src, 'w', encoding='ascii', newline=chr(10)) as fh:
+    for i, e in enumerate(E):
+        fh.write('%.4f %.6f' % (e, raw[i]) + chr(10))
+out_xps = os.path.join(d, 'c.xps')
+spec = os.path.join(d, 'c.dat')
+def fake(exe, s, peaks, out, spec2=None, par=None, background=None, bg_type=None):
+    open(out, 'wb').write(b'x')
+    with open(spec2, 'w', encoding='utf-8', newline=chr(10)) as fh:
+        fh.write('B.E.\\tRaw Intensity\\tPeak Sum\\tBackground' + chr(10))
+        for i, e in enumerate(E):
+            fh.write('%.4f\\t%.4f\\t%.4f\\t%.4f' % (e, raw[i], raw[i], 800 + (880 - e) * 20 + 5000.0) + chr(10))
+    return {'xps': out, 'xps_bytes': 1, 'peaks': [{'pos': p['pos'], 'fwhm': p['fwhm'], 'area': p['area']} for p in peaks]}
+M.D.build = fake
+msg = ''
+try:
+    M.do_build({'path': src, 'peaks': [{'pos': 870.0, 'fwhm': 1.5, 'area': 20000.0, 'gl': 30}],
+                'out': out_xps, 'spec': spec, 'expect_bg': 'shirley', 'window': [865.0, 875.0],
+                'wlo': 1.0, 'whi': 3.0})
+except ValueError as e:
+    msg = str(e)
+print(json.dumps({'msg': msg, 'exists': os.path.exists(out_xps)}, ensure_ascii=False))
+`);
+  const r = JSON.parse(out);
+  assert.match(r.msg, /建区背景与拟合背景不一致/, '必须点名背景口径不一致');
+  assert.equal(r.exists, false, '被拦下时盘上不许留下 .xps');
+});
+
 /* ───────── 结果 ───────── */
 
 if (failures.length > 0) {

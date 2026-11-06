@@ -2354,6 +2354,48 @@ check('I2 runlog 顶层键白名单：artifacts 这种错键必须 400 unknown-f
   assert.equal(run.spectrumSha256, i1sha, 'run.json 必须记下审计谱的 sha256（同源判据要靠它）');
 });
 
+check('I3 assess_peaks 背景口径：bg=None 内部按同源算法重算（shirley/linear），长度不符直接拒绝', () => {
+  if (!pyForGuards) {
+    process.stdout.write('  skip 找不到 python，跳过 I3\n');
+    return;
+  }
+  const out = JSON.parse(runPy(`
+import inspect, json, sys
+sys.path.insert(0, 'server')
+import xps_fit as F
+
+E = [880.0 - 0.1 * i for i in range(200)]
+base = [4000.0 + (E[0] - e) * 12.0 for e in E]
+peaks = [dict(pos=870.0, fwhm=1.6, area=60000.0, gl=30)]
+model = [0.0] * len(E)
+for pk in peaks:
+    af = F.area_factor(pk["gl"] / 100.0)
+    h = pk["area"] / (pk["fwhm"] * af)
+    for i, e in enumerate(E):
+        model[i] += F.gl(e, pk["pos"], pk["fwhm"], h, pk["gl"] / 100.0)
+raw = [base[i] + model[i] for i in range(len(E))]
+lo, hi = 865.0, 875.0
+a = F.assess_peaks(E, raw, None, peaks, lo, hi)
+b = F.assess_peaks(E, raw, F.shirley_bg(E, raw), peaks, lo, hi)
+c = F.assess_peaks(E, raw, None, peaks, lo, hi, bg_kind="linear")
+d = F.assess_peaks(E, raw, F.linear_bg(E, raw), peaks, lo, hi)
+err = ""
+try:
+    F.assess_peaks(E, raw, [0.0] * 10, peaks, lo, hi)
+except Exception as exc:
+    err = str(exc)
+doc = inspect.getdoc(F.assess_peaks) or ""
+print(json.dumps({"a": a["r2"], "b": b["r2"], "c": c["r2"], "d": d["r2"],
+                  "err": err, "doc_same": "同源" in doc, "doc_866": "866" in doc}))
+`));
+  assert.ok(Math.abs(out.a - out.b) < 1e-9, 'bg=None 必须与显式同源 Shirley 逐位一致：' + JSON.stringify(out));
+  assert.ok(Math.abs(out.c - out.d) < 1e-9, 'bg_kind=linear 必须与显式 linear_bg 一致：' + JSON.stringify(out));
+  assert.ok(Math.abs(out.a - out.c) > 1e-6, 'shirley 与 linear 必须真的算出不同背景（否则 bg_kind 没生效）：' + JSON.stringify(out));
+  assert.match(out.err, /长度/, '长度不符要直接拒（补零等于换了背景）：' + out.err);
+  assert.equal(out.doc_same, true, 'docstring 要写死「bg 必须是整条谱的同源背景」');
+  assert.equal(out.doc_866, true, 'docstring 要写清全谱 vs 窗口 Shirley 的实测差 866 cps');
+});
+
 /* ───────── 结果 ───────── */
 
 if (failures.length > 0) {

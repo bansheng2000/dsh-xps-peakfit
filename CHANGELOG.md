@@ -8,6 +8,10 @@
 - **I2 runlog 键名白名单**（`lib/routes.js`）：只认 `files`，此前传 `artifacts` 会被静默忽略并写出空数组。现在顶层键走白名单（`dir`/`files`/`templateId`/`fit`/`result`/`chargeCorrection`/`forced`/`preflight`/`overwrite`/`spectrumSha256`），未知键 400 `unknown-field`，message 列出允许键并点明「产物列表的键名是 files，不是 artifacts」；新增 `spectrumSha256`（64 位十六进制校验），写进 `run.json` 供同源判据使用。
 - 自检 130 → 134（I1 / I1b / I1c / I2 四条）；先红三条（旧代码上 I1b、I2 与 I1 全红，I1c 是「非同源仍 fail」的守门断言，旧代码本来就 fail）。
 - 两处变异各真红：同源降级关掉（`same !== null` → `false &&`）→ I1/I1b 红；runlog 未知字段不再拒绝 → I2 红。
+- **I3 背景口径写死**（`server/xps_fit.py:assess_peaks()`）：`bg` 允许传 `None`，由函数按 `bg_kind`（`shirley`/`linear`）用**与 fit 同源的整谱算法**重算再按 `lo/hi` 切片；传进来的背景数组必须与谱等长，长度不符直接抛错（不补零——补零等于换了一条背景）。docstring 写死口径与实测差（全谱 vs 窗口 Shirley 平均 866 cps）。`build_quality()` 另加长度/端点一致性断言：背景与谱、Background 列与谱都必须同长，否则报「内部错误」而不是算出一套看着像的 R²。
+- **I4 文档**：`SKILL.md` / `README.md` 写明「重建模板曲线只能在拟合窗口内算 Shirley、端点取窗口两端；用整谱算实测最大差 1301.75 cps」。
+- **I5 文档**：面积回读是系统偏差 2–5%（宽峰尾部更甚，峰 2 FWHM 4.25 时到 5%），不要设成 1% 硬闸；要设就 6% 警告 / 10% 阻断，并在产物里注明「面积以回读值为准」。
+- 自检 134 → 135（I3 一条）；先红：旧代码上 I3 直接 `Command failed`（`assess_peaks` 无 `bg_kind`）；两处变异各真红（忽略 `bg_kind` → linear 断言红；删长度校验 → 「list index out of range」）。
 - `lib/client.js` 另修一处侧栏空白：`runAudit` 的 `const` 定义在 `const header` 之后，而 header 的「审计这份」按钮先引用它 → 渲染第一步抛 TDZ `ReferenceError`，整页空白。把 `runAudit` 整块移到 `header` 之前（内部改用 `state.selection?.templateId ?? null`）。
 
 ## 未发版修订（第十三批：linear 背景在 build 预检里发警告，不当闸）

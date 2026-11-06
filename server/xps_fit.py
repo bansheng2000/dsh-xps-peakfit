@@ -410,15 +410,28 @@ def bg_shape_check(bgcol, height, tol=BG_SHAPE_TOL):
                 pct_of_height=round(100.0 * mx / float(height), 2) if height else None)
 
 
-def assess_peaks(E, raw, bg, peaks, lo, hi):
+def assess_peaks(E, raw, bg, peaks, lo, hi, bg_kind="shirley"):
     """按**给定**峰参数（不再优化）复算 fit 的优度结构，供 build 在落盘前复用 preflight()。
 
     与 fit() 的口径逐项对齐：target = raw - bg（扣背景）、r2 用扣背景口径、r2_raw 只作信息、
     残差按窗口等分四段、峰顶缺口 = max|data-fit| / max(target)。
     peaks: [{"pos","fwhm","area","gl"}]，gl 可以是 0-100 的百分数或 0-1 的分数。
+
+    背景（bg）的口径是这里最容易错的一步，写死如下：
+      * bg 必须是**与 fit() 同源**的那一条：先在整条谱上按 fit 用的算法算出来（shirley_bg /
+        linear_bg），再按 lo/hi 切片；传进来的数组必须与 E 等长。
+      * 传 None 时由本函数按 bg_kind（"shirley" | "linear"）用同样的整谱算法重算、再切片，
+        避免调用方自己拿窗口内两点重算 —— 全谱 Shirley 与窗口 Shirley 实测平均差 866 cps
+        （ni2p_cc.dat），会算出另一套 R²/残差。
+      * 长度不一致直接抛错，不静默补零（补零等于换了一条背景）。
     返回的 dict 里**没有** bound / not_optimized：build 的参数是人给的、不是拟合出来的，
     那两条闸由 build_guard 单独管（顶到 wlo/whi 同样拒绝保存）。
     """
+    if bg is None:
+        bg = linear_bg(E, raw) if str(bg_kind).lower() == "linear" else shirley_bg(E, raw)
+    elif len(bg) != len(E):
+        raise ValueError("背景长度 %d 与谱长 %d 不一致：bg 必须是整条谱的同源背景（或传 None 由本函数重算）"
+                         % (len(bg), len(E)))
     idx = _widx(E, lo, hi)
     if len(idx) < 10:
         raise ValueError("窗口 %.2f-%.2f eV 内只有 %d 点，无法评估优度" % (lo, hi, len(idx)))

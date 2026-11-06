@@ -648,7 +648,16 @@ def build_quality(path, peaks, window=None, expect_bg=None, crop=True):
                 "⛔ 模板背景是 file（用谱自带的 Background 列），但这份 ASCII 只读到 %d 列、没有背景列："
                 "先导出带 Background 的谱，或把模板背景改成 shirley/linear（fit 会先报这条，这里再兜一次）。" % ncol)
         bg = bgcol
-    res = F.assess_peaks(E, raw, bg, peaks, lo, hi)
+    # 断言：背景与谱必须同长、端点取自同一段谱。build_quality 曾经用「全谱弦」算背景、
+    # 却把峰参数落在「裁到窗口后的谱」上（runB2：r² 0.930191 vs fit 的 0.960379），
+    # 差的就是端点。口径一错，R²/残差都会给出另一套数，而且看着还挺像。
+    if len(bg) != len(E):
+        raise ValueError("内部错误：背景长度 %d 与谱长 %d 不一致（build_quality 必须用同源背景）"
+                         % (len(bg), len(E)))
+    if bgcol is not None and len(bgcol) != len(E):
+        raise ValueError("内部错误：Background 列长 %d 与谱长 %d 不一致（请检查列解析）"
+                         % (len(bgcol), len(E)))
+    res = F.assess_peaks(E, raw, bg, peaks, lo, hi, bg_kind=("linear" if expect_bg == "linear" else "shirley"))
     pf = F.preflight(res, E=res["curves"]["E"], bg_used=(expect_bg or "none"),
                      expect_bg=expect_bg, bg_col=bgcol)
     # linear 背景的「适不适合」没有可用判据（第十二批 A 项实测最好只拉开 7.9×），

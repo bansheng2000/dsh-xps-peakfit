@@ -68,6 +68,8 @@ XPS 分峰拟合 SOP —— 一个给 AI agent 用的 skill（Agent Skills 目�
 
 模板是一个 JSON（`name` / `category` / `element` / `orbital` / `doublet_delta_ev` / `peak_windows[]` / `fwhm_min` / `fwhm_max` / `background` / `constraints` / `note`；schema v2 起可选 `eta` / `charge_correction_ev` / `reference_peak` / `provenance` / `peak_windows[].observed`，schema v3 再加逐峰 `peak_windows[].eta` 与 `applicable_window_ev`（目标谱窗口不足其 90% 则 `use` 返回 422 `window-too-narrow`；90%–100% 放行并给 warnings），缺省仍按老模板走），**不预置任何模板**：峰位差 1 eV 结论就错，宁可不给。缩略图由 `lib/routes.js:pseudoVoigt` 按模板参数算一条模拟谱拼成 SVG（公式与 `server/xps_fit.py:gl` 一致，自检里对拍），算不出来给「无参数」占位。
 
+审计与交付凭证：`POST /xps/audit`（只认 `_spectrum.dat` + `_peaks.dat` 文本导出，不解析 `.xps`）给七项检查与 `verdict`；`POST /xps/runlog` 在产物目录写 `run.json`（模板 id、实际 fit 参数、R²/rms/撞界/门检查、产物 sha256）。选择态 `selection.json` 另存 `chargeCorrection` 五字段（`reference_peak` / `measured_ev` / `target_ev` / `shift_ev` / `method`，`shift=target−measured` 校验）。
+
 **「用这个」只产出结构化指令**（模板字段 + 建议调用顺序 + `notes`），交 agent 执行；参数一律落在 `xpspeak_fit`（`centers`/`ds`/`ratio`/`wlo`/`whi`/`bg`/`eta`/`ctol`；`ctol` 取各峰 `search_ev` 最大值），**Add Peak 是菜单命令、不接收位置与宽度参数**，别指望它带参数建峰；服务端**从不**调 MCP、不驱动 XPSPeak。模板缺 `eta` 时 `use` 仍 200，但 `instruction.warnings` 会写明「已按 0.3 拟合」。逐峰 `eta` 只读 `peak_windows[].eta`；`observed.gl_pct` 是事后对照，**不进拟合**。教学模式（`~/.dsh/dsh-xps-peakfit/mode.json`，与 MCP 同一份真源）下按钮禁用，且服务端同样返回 403 —— 前端禁用只是体验，闸门在服务端。
 
 **保存前校验链**：`server/xps_fit.py:preflight()` 与 `server/xpspeak_mcp.py:build_guard()` 在落盘前判七条——撞界、背景不一致、未优化参数（初值=终值）、R²<0.85、残差四段任一段 >0.5×rms、峰顶缺口 >10%、linear 模板的 Background 列偏离直线 >0.5% 峰高；任一 errors 即阻断（build 侧会删掉刚写出的 `.xps`）。阈值常量在 `server/xps_fit.py` 顶部，依据写在 `SKILL.md`「保存前的校验链」一节。

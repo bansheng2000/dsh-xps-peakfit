@@ -12,7 +12,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, request as createHttpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -30,6 +30,7 @@ import {
   renameTemplate,
   sha256,
   selectionFile,
+  validateChargeCorrection,
   stateRoot,
   thumbSvg,
   useInstruction,
@@ -38,6 +39,7 @@ import {
   writeFavorites,
 } from '../lib/routes.js';
 import { SERVER_FILES, packagedServerDir, syncServerFiles } from '../lib/index.js';
+import { auditArtifacts, parsePeaks, parseSpectrum } from '../lib/audit.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = dirname(HERE);
@@ -430,7 +432,7 @@ check('W3 schema：peak_windows[].eta 与 applicable_window_ev 的范围校验',
   ]) assert.equal(validateTemplate(bad).ok, false, JSON.stringify(bad));
 });
 
-check('W4 窗口适用性：17.5 对 40 拒绝（message 带两个宽度）；39.8 放行+警告；36.0/35.9 判死；读不到只警告', () => {
+check('W4 窗口适用性：17.5 拒绝（message 带两个宽度）；39.8/36.0 放行+警告；35.99 判死；36.01 放行；读不到只警告', () => {
   const t = { ...GOOD, applicable_window_ev: 40 };
   const narrow = useInstruction(t, 'exec', { lo: 844.1, hi: 861.6 }); // 17.5 eV
   assert.equal(narrow.ok, false, '窗口不够必须拒绝');
@@ -443,8 +445,12 @@ check('W4 窗口适用性：17.5 对 40 拒绝（message 带两个宽度）；39
   assert.match(w, /39\.80 eV/, '放行时 warnings 要写实际宽度');
   assert.match(w, /窄 0\.20 eV/, '放行时 warnings 要写窄了多少');
   assert.match(w, /≥90%/, '容差口径要写明');
-  assert.equal(useInstruction(t, 'exec', { lo: 850, hi: 886 }).ok, false, '恰好 90%（36.0）判死');
+  const exact = useInstruction(t, 'exec', { lo: 850, hi: 886 }); // 36.0 = 90%
+  assert.equal(exact.ok, true, '恰好 90%（36.0）应放行（整数比较，不吃浮点误差）');
+  assert.match(exact.instruction.warnings.join('\n'), /36\.00 eV/, '放行也要写实际宽度');
   assert.equal(useInstruction(t, 'exec', { lo: 850.1, hi: 886 }).ok, false, '35.9 判死');
+  assert.equal(useInstruction(t, 'exec', { lo: 850.01, hi: 886 }).ok, false, '35.99 判死');
+  assert.equal(useInstruction(t, 'exec', { lo: 849.99, hi: 886 }).ok, true, '36.01 放行');
   assert.equal(useInstruction(t, 'exec', { lo: 830, hi: 875 }).ok, true, '45 比 40 宽，直接放行');
   const unknown = useInstruction(t, 'exec', null);
   assert.equal(unknown.ok, true, '拿不到谱就不能拦');
@@ -476,6 +482,203 @@ check('W5 HTTP：POST /templates/<id>/use 带谱图路径，窗口不足 → 422
   assert.match(w5Bad.json.message, /17\.5/, '拒绝理由要写实际窗口宽度');
   assert.equal(w5Good.status, 200, JSON.stringify(w5Good.json));
   assert.equal(w5Good.json.ok, true);
+});
+
+/* ── 第三批：审计 / 荷电校正登记 / run.json ── */
+
+const b3dir = join(tmp, 'b3');
+mkdirSync(b3dir, { recursive: true });
+const b3be = [];
+for (let i = 0; i < 200; i += 1) b3be.push(Number((880 - i * 0.1).toFixed(3)));
+const gauss = (x, c, fwhm, h) => h * Math.exp(-4 * Math.LN2 * ((x - c) / fwhm) ** 2);
+const b3bg = b3be.map((x) => 500 + (880 - x) * 10);
+const b3comp = b3be.map((x) => gauss(x, 862, 1.6, 20000) + gauss(x, 856, 2.0, 8000));
+const b3fit = b3comp.map((v, i) => v + b3bg[i]);
+const b3raw = b3fit.map((v, i) => v + Math.sin(i));
+
+function writeSpec(file, { be, raw, fit, bg }) {
+  const head = 'B.E.(eV)\tRaw Intensity\tPeak Sum\tBackground\tdifference\n';
+  const body = be.map((x, i) => [x, raw[i], fit[i], bg[i], raw[i] - fit[i]].map((v) => v.toFixed(3)).join('\t')).join('\n');
+  writeFileSync(file, head + body + '\n', 'utf8');
+  return file;
+}
+
+const b3spec = writeSpec(join(b3dir, 'good_spectrum.dat'), { be: b3be, raw: b3raw, fit: b3fit, bg: b3bg });
+const b3peaks = join(b3dir, 'good_peaks.dat');
+writeFileSync(
+  b3peaks,
+  ['Peak\tPosition (eV)\tArea\tFWHM (eV)\t%GL (%)', '0\t870.000\t90000\t1.650\t30', '1\t875.000\t40000\t1.050\t30'].join('\n') + '\n',
+  'utf8',
+);
+const b3tpl = {
+  ...GOOD,
+  peak_windows: [{ label: 'a', center_ev: 870, observed: { fwhm_ev: 1.6, gl_pct: 30 } }, { label: 'b', center_ev: 875, observed: { fwhm_ev: 1.0, gl_pct: 30 } }],
+  background: 'linear',
+  applicable_window_ev: 18,
+};
+
+check('X1 审计好产物：R²/残差/峰顶缺口/窗口全过，verdict=pass', () => {
+  const a = auditArtifacts({ spectrumPath: b3spec, peaksPath: b3peaks, template: b3tpl });
+  assert.equal(a.checks.length, 7, JSON.stringify(a.checks));
+  const byId = Object.fromEntries(a.checks.map((c) => [c.id, c]));
+  assert.equal(byId['fit-quality'].status, 'pass', byId['fit-quality'].detail);
+  assert.equal(byId['residual-structure'].status, 'pass', byId['residual-structure'].detail);
+  assert.equal(byId['peak-gap'].status, 'pass', byId['peak-gap'].detail);
+  assert.equal(byId['bg-shape'].status, 'pass', byId['bg-shape'].detail);
+  assert.equal(byId['window-applicability'].status, 'pass', byId['window-applicability'].detail);
+  assert.equal(a.verdict, 'pass');
+});
+
+check('X2 审计认得出「照搬模板」：FWHM 全等 + 峰位整体平移 → template-copied fail', () => {
+  const copiedPeaks = join(b3dir, 'copied_peaks.dat');
+  writeFileSync(
+    copiedPeaks,
+    ['Peak\tPosition (eV)\tArea\tFWHM (eV)\t%GL (%)', '0\t870.900\t90000\t1.600\t30', '1\t875.900\t40000\t1.000\t30'].join('\n') + '\n',
+    'utf8',
+  );
+  const a = auditArtifacts({ spectrumPath: b3spec, peaksPath: copiedPeaks, template: b3tpl });
+  const c = a.checks.find((x) => x.id === 'template-copied');
+  assert.equal(c.status, 'fail', c.detail);
+  assert.match(c.detail, /平移 0\.900 eV/);
+  assert.equal(a.verdict, 'fail');
+});
+
+check('X3 审计认出 Fake 拟合与台阶背景：fit 差 10% + 背景列不是直线 → 双 fail', () => {
+  const fake = join(b3dir, 'fake_spectrum.dat');
+  const stepBg = b3be.map((x) => 500 + (880 - x) * 10 + (x < 870 ? 3000 : 0)); // 真实线性 + 台阶，偏离直线
+  writeSpec(fake, { be: b3be, raw: b3fit, fit: b3fit.map((v) => v * 0.8), bg: stepBg });
+  const a = auditArtifacts({ spectrumPath: fake, peaksPath: b3peaks, template: b3tpl });
+  const byId = Object.fromEntries(a.checks.map((c) => [c.id, c]));
+  assert.equal(byId['bg-shape'].status, 'fail', byId['bg-shape'].detail);
+  assert.equal(byId['peak-gap'].status, 'fail', byId['peak-gap'].detail);
+  assert.equal(a.verdict, 'fail');
+});
+
+check('X4 解析器只认文本导出：坏文件抛错，不静默给空结果', () => {
+  const bad = join(b3dir, 'bad.dat');
+  writeFileSync(bad, 'not a spectrum\n', 'utf8');
+  assert.throws(() => parseSpectrum(bad), /行数不足/);
+  const ok = parseSpectrum(b3spec);
+  assert.equal(ok.rows, 200);
+  const pk = parsePeaks(b3peaks);
+  assert.equal(pk.length, 2);
+  assert.equal(pk[0].fwhm, 1.65);
+});
+
+const b3srv = createServer(createRoutes({ root, env: { ...process.env, XPSPEAK_ROOT: root, XPSPEAK_MODE: '', XPSPEAK_MODE_FILE: '' } }));
+await new Promise((resolve) => b3srv.listen(0, '127.0.0.1', resolve));
+const b3port = b3srv.address().port;
+const b3created = createTemplate(b3tpl, root);
+const auditOk = await request(b3port, '/xps/audit', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ spectrumPath: b3spec, peaksPath: b3peaks, templateId: b3created.template.id }),
+});
+const audit404 = await request(b3port, '/xps/audit', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ spectrumPath: b3spec, peaksPath: b3peaks, templateId: 'nope' }),
+});
+const useMissing = await request(b3port, `/xps/templates/${b3created.template.id}/use`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ spectrumPath: b3spec }),
+});
+const chargeOK = await request(b3port, '/xps/selection', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    templateId: b3created.template.id,
+    spectrumPath: b3spec,
+    chargeCorrection: { reference_peak: 'C 1s', measured_ev: 283.8, target_ev: 284.6, shift_ev: 0.8, method: 'linear 尾背景，C 1s 主峰单峰拟合' },
+  }),
+});
+const chargeBad = await request(b3port, '/xps/selection', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    chargeCorrection: { reference_peak: 'C 1s', measured_ev: 283.8, target_ev: 284.6, shift_ev: 0.44, method: 'x' },
+  }),
+});
+const selRead = await request(b3port, '/xps/selection');
+const useWithCharge = await request(b3port, `/xps/templates/${b3created.template.id}/use`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ spectrumPath: b3spec }),
+});
+const runlog = await request(b3port, '/xps/runlog', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    dir: b3dir,
+    templateId: b3created.template.id,
+    fit: { ds: 0, ratio: 1, wlo: 0.6, whi: 1.6 },
+    result: { r2: 0.99, rms: 1.2, bound: [], gates: [] },
+    files: [b3spec, b3peaks],
+    chargeCorrection: selRead.json.selection.chargeCorrection,
+  }),
+});
+const runFile = join(b3dir, 'run.json');
+const runJson = existsSync(runFile) ? JSON.parse(readFileSync(runFile, 'utf8')) : null;
+
+check('X5 HTTP /xps/audit：200 带 verdict，模板不存在 404', () => {
+  assert.equal(auditOk.status, 200, JSON.stringify(auditOk.json));
+  assert.equal(auditOk.json.verdict, 'pass');
+  assert.match(auditOk.json.scope, /不解析 \.xps/);
+  assert.equal(audit404.status, 404);
+});
+
+check('X6 chargeCorrection 五字段：写入可回读，shift 与 target−measured 不自洽 → 400', () => {
+  assert.equal(chargeOK.status, 200, JSON.stringify(chargeOK.json));
+  assert.equal(chargeOK.json.selection.chargeCorrection.shift_ev, 0.8);
+  assert.equal(selRead.json.selection.chargeCorrection.method.includes('linear'), true);
+  assert.equal(chargeBad.status, 400, JSON.stringify(chargeBad.json));
+  assert.equal(chargeBad.json.code, 'bad-charge-correction');
+  assert.match(chargeBad.json.errors.join('\n'), /shift_ev 必须等于/);
+  assert.equal(validateChargeCorrection({ reference_peak: 'C 1s' }).ok, false);
+});
+
+check('X7 use 缺荷电登记 → warnings 点名；登记后不再出现', () => {
+  const missing = useMissing.json.instruction.warnings.join('\n');
+  assert.match(missing, /缺 chargeCorrection/, '没登记时必须点名');
+  const w = useWithCharge.json.instruction.warnings.join('\n');
+  assert.doesNotMatch(w, /缺 chargeCorrection/, '已登记就不该再提示缺');
+  assert.equal(selRead.json.selection.chargeCorrection.reference_peak, 'C 1s');
+});
+
+check('X8 /xps/runlog：写 run.json，产物 sha256 可复核；教学档 403', () => {
+  assert.equal(runlog.status, 200, JSON.stringify(runlog.json));
+  assert.equal(runJson.templateId, b3created.template.id);
+  assert.equal(runJson.artifacts.length, 2);
+  assert.equal(runJson.artifacts[0].sha256, sha256(readFileSync(b3spec)));
+  assert.equal(runJson.artifacts[0].bytes, readFileSync(b3spec).length);
+  assert.equal(runJson.result.r2, 0.99);
+  assert.equal(runJson.chargeCorrection.shift_ev, 0.8);
+  assert.match(runJson.createdAt, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+writeFileSync(join(root, 'mode.json'), '{"mode":"teach"}', 'utf8');
+const runlogTeach = await request(b3port, '/xps/runlog', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ dir: b3dir, files: [] }),
+});
+try { rmSync(join(root, 'mode.json')); } catch { /* 无文件即可 */ }
+await new Promise((resolve) => b3srv.close(resolve));
+removeTemplate(b3created.template.id, root);
+
+check('X9 教学档：/xps/runlog 也 403（不能被当成「只是写个日志」绕过）', () => {
+  assert.equal(runlogTeach.status, 403, JSON.stringify(runlogTeach.json));
+  assert.equal(runlogTeach.json.code, 'teaching-mode');
+});
+
+check('X10 客户端「审计这份」：调 /audit、传两条路径与模板、教学档禁用', () => {
+  const src = readFileSync(join(REPO, 'lib', 'client.js'), 'utf8');
+  assert.match(src, /api\("\/audit"/, '必须调 POST /xps/audit');
+  assert.match(src, /"审计这份"/, '按钮文案要是「审计这份」');
+  assert.match(src, /spectrumPath: specPath[\s\S]{0,60}peaksPath: peaksPath/, '必须把谱图与峰表路径一起送审');
+  assert.match(src, /disabled: isTeach \|\| busy \|\| specPath\.trim\(\) === ""/, '教学档与空路径时按钮要禁用');
+  assert.match(src, /不解析 \.xps/, '审计结论要写明只审文本导出');
 });
 
 check('⑤ 详情表：卡片能开详情，含 GL 与「模板值 vs 实测值」两列', () => {

@@ -1,5 +1,12 @@
 # 变更记录
 
+## 未发版修订（第七批：全 skip 判 insufficient）
+
+版本仍 `2.8.0`。
+
+- **全 skip 不再判 pass**：`lib/audit.js:301-318` 先统计 `{pass, warn, fail, skip}` 四项计数（`summary.counts`），verdict 按 `fail > warn > pass` 降级，三者均为 0 时判 `insufficient` —— 只有 B.E.+强度的 2 列谱五项检查全 skip，以前会输出「通过」，比 fail 更容易被当成已核验。
+- 自检 99 → 101（Z5 全 skip → insufficient 且 `counts.skip === 5`；Z6 有实质检查时仍判 pass 且 counts 四项之和等于 checks 数）；两处变异均真红。
+
 ## 未发版修订（第六批：交付凭证防覆盖 / 2 列谱可审）
 
 版本仍 `2.8.0`。

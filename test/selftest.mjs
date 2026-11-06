@@ -798,6 +798,22 @@ check('Z4 列数不足（1 列）：报列数并写明需要 2 列或 XPSPeak �
   assert.match(auditOne.json.message, /2 列/);
 });
 
+check('Z5 全 skip 判 insufficient（不叫通过），summary 给四项计数', () => {
+  assert.equal(twoColAudit.value.verdict, 'insufficient', JSON.stringify(twoColAudit.value.checks.map((c) => c.status)));
+  assert.deepEqual(
+    twoColAudit.value.summary.counts,
+    { pass: 0, warn: 0, fail: 0, skip: 5 },
+    JSON.stringify(twoColAudit.value.summary.counts),
+  );
+});
+
+check('Z6 有实质检查且无 fail/warn → 仍判 pass，并带 counts', () => {
+  const good = auditArtifacts({ spectrumPath: b3spec, peaksPath: b3peaks });
+  assert.equal(good.verdict, 'pass', JSON.stringify(good.checks));
+  assert.equal(good.summary.counts.pass + good.summary.counts.warn + good.summary.counts.fail > 0, true, '必须真有检查跑过');
+  assert.equal(good.summary.counts.skip + good.summary.counts.pass + good.summary.counts.warn + good.summary.counts.fail, good.checks.length);
+});
+
 check('X10 客户端「审计这份」：调 /audit、传两条路径与模板、教学档禁用', () => {
   const src = readFileSync(join(REPO, 'lib', 'client.js'), 'utf8');
   assert.match(src, /api\("\/audit"/, '必须调 POST /xps/audit');

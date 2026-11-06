@@ -610,6 +610,50 @@ def bg_plan(path, window, out_xps, crop=True):
     return {"used": info["used"], "scope": chk2, "crop": info, "before": chk}
 
 
+def build_quality(path, peaks, window=None, expect_bg=None, crop=True):
+    """B：build 自己复算一遍 xpspeak_fit 的优度门槛（R²(扣背景)/残差分段/峰顶缺口）。
+
+    以前 build 拿到的峰参数即使 fit 判了「⛔ 已阻断保存」，照样驱动 XPSPeak 建区落盘 ——
+    fit 的闸形同虚设（实测：linear 模板套台阶谱，fit 残差段 -1604、缺口 10.9%，build 仍
+    产出 11379 B 的 .xps 并宣称「背景口径与拟合一致」）。这里不给第二套阈值：直接构造
+    与 fit() 同形的 res，交给同一个 preflight() 判，code/文案天然一致。
+
+    返回 (res, pf)；源谱是 .xps/.rpa 时无法解析 → (None, None)（调用方必须如实写进回包）。
+    """
+    if os.path.splitext(path)[1].lower() in (".xps", ".rpa"):
+        return None, None
+    E, raw, bgcol, ncol = F.load(path)
+    lo, hi = (min(float(window[0]), float(window[1])), max(float(window[0]), float(window[1]))) \
+        if window else (min(E), max(E))
+    # 口径必须与真正落盘的那份谱一致：do_build 默认先把谱裁到拟合窗口再载入 XPSPeak，
+    # 所以背景要在**裁剪后**的谱上重取端点（窗口弦），而不是全谱弦。
+    # 实测反例（runB2 同一组参数、ni2p_cc.dat）：全谱弦 r²=0.930191/rms=1610.6，
+    # 窗口弦 r²=0.960379/rms=1215.6 —— 后者与 fit 回包一字不差；用全谱弦会把
+    # 「残差第 4 段 −1604」错报成 −1293、并让每一段都误判超界。
+    if crop:
+        idx = F._widx(E, lo, hi)
+        if not idx:
+            raise ValueError("窗口 %.2f-%.2f eV 内没有数据点，无法评估优度" % (lo, hi))
+        E = [E[i] for i in idx]
+        raw = [raw[i] for i in idx]
+        bgcol = [bgcol[i] for i in idx] if bgcol else None
+        lo, hi = min(E), max(E)
+    if expect_bg == "linear":
+        bg = F.linear_bg(E, raw)
+    elif expect_bg == "shirley" or expect_bg is None:
+        bg = F.shirley_bg(E, raw)
+    else:
+        if not bgcol:
+            raise ValueError(
+                "⛔ 模板背景是 file（用谱自带的 Background 列），但这份 ASCII 只读到 %d 列、没有背景列："
+                "先导出带 Background 的谱，或把模板背景改成 shirley/linear（fit 会先报这条，这里再兜一次）。" % ncol)
+        bg = bgcol
+    res = F.assess_peaks(E, raw, bg, peaks, lo, hi)
+    pf = F.preflight(res, E=res["curves"]["E"], bg_used=(expect_bg or "none"),
+                     expect_bg=expect_bg, bg_col=bgcol)
+    return res, pf
+
+
 def do_build(a):
     """一次调用把一组峰参数落成可交付的 .xps（不需要人点 GUI）。
 
@@ -640,8 +684,9 @@ def do_build(a):
     win = a.get("window")
     plan = None
     used = a["path"]
+    crop_used = a.get("crop", True)
     if win and a.get("bg") is not False:
-        plan = bg_plan(a["path"], [float(win[0]), float(win[1])], out, a.get("crop", True))
+        plan = bg_plan(a["path"], [float(win[0]), float(win[1])], out, crop_used)
         used = plan["used"]
     verify = spec
     tmp_verify = None
@@ -649,6 +694,28 @@ def do_build(a):
         tmp_verify = os.path.join(tempfile.gettempdir(), "xpspeak_bgcheck_%d.dat" % abs(hash(out)))
         verify = tmp_verify
     edge = _edge_warnings(used, peaks)
+    # B：落盘前先按同一组峰参数复算 fit 的优度门槛（fit 判阻断的，build 一律不建）。
+    force = bool(a.get("force"))
+    qtxt = ""
+    qres, qpf = build_quality(used, peaks, win, expect, crop_used)
+    if qpf is None:
+        qtxt = ("⚠ 优度预检未执行：源谱是 %s，纯 Python 读不了它的谱表；"
+                "这份 .xps 的优度结论只能事后用 audit 核。" % os.path.splitext(used)[1].lstrip("."))
+    elif not qpf["ok"]:
+        if not force:
+            raise ValueError(
+                "⛔ 已阻断保存：这组峰参数过不了 xpspeak_fit 的同一套门槛，XPSPeak 未被驱动、盘上没有 .xps。\n"
+                + F.preflight_text(qpf)
+                + "\n（要强行建区必须显式 force=true；那样会把 forced=true 与上面每一项写进回包，"
+                  "run.json 必须原样记录，不许当正常产物交付。）")
+        qtxt = ("⚠ force=true：已强制放行，以下门槛未过（原样写进 run.json 的 forced/preflight）：\n"
+                + F.preflight_text(qpf) + "\n")
+    else:
+        qtxt = "优度预检（与 xpspeak_fit 同口径）：R²(扣背景)=%.4f、rms=%.1f cps" % (
+            qres["r2"] if qres else float("nan"), qres["rms"] if qres else float("nan"))
+        if qpf["warnings"]:
+            qtxt += "\n" + F.preflight_text(qpf)
+        qtxt += "\n"
     bg_flag = a.get("bg")
     bg_type = a.get("bg_type")
     if expect in ("shirley", "linear"):
@@ -657,6 +724,10 @@ def do_build(a):
         bg_flag, bg_type = False, None
     r = D.build(EXE, used, peaks, out, verify, par, bg_flag, bg_type)
     txt = "已生成 %s（%d 字节）" % (r["xps"], r["xps_bytes"])
+    if qtxt:
+        txt = qtxt + txt
+    if force and qpf is not None and not qpf["ok"]:
+        txt += "\nforced: true（未过门槛 %d 项）" % len(qpf["errors"])
     if win and (expect in ("shirley", "linear") or plan is not None):
         cons = bg_consistency(verify, used, win, "linear" if expect == "linear" else "shirley")
         if not cons.get("ok"):
@@ -821,7 +892,9 @@ TOOLS = [
       "window": {"type": "array", "items": {"type": "number"},
                  "description": "本次 xpspeak_fit 用的拟合窗口 [lo, hi]（eV）：给了就核对「全谱 Shirley」与「窗口 Shirley」，不一致时默认自动裁谱到该窗口再建区，避免 Peak Sum 系统性偏低"},
       "crop": {"type": "boolean",
-               "description": "背景口径不一致时是否自动裁谱到拟合窗口（默认 true）；false = 直接拒绝，不静默建区"}},
+               "description": "背景口径不一致时是否自动裁谱到拟合窗口（默认 true）；false = 直接拒绝，不静默建区"},
+      "force": {"type": "boolean",
+                "description": "强行建区：默认 false。build 会先按给定峰参数复算 xpspeak_fit 的优度门槛（R²(扣背景)、残差分段、峰顶缺口），不过就拒绝驱动 XPSPeak 且不落盘；只有显式 true 才放行，且回包会写 forced:true 与每一项未过门槛，必须原样记进 run.json"}},
      ["path", "peaks"]),
     ("xpspeak_status",
      "启动（若未运行）并返回进程号、窗体、按钮、全部菜单项和当前模式。任何操作前先调它。"

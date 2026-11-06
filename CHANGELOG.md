@@ -1,5 +1,15 @@
 # 变更记录
 
+## 未发版修订（第十二批：build 复算 fit 门槛、force 留痕；linear 背景判据测量）
+
+版本仍 `2.8.0`。
+
+- **B：build 自己复算 fit 的门槛**（`server/xps_fit.py:assess_peaks()`、`server/xpspeak_mcp.py:build_quality()` + `do_build` 内接线）。以前 fit 把「⛔ 已阻断保存」写进回包，build 照建不误：实测 `E:\文档\deepseek-harness\ceshiqu\out\20261106-ni2p-scan-v2\runB2\runB2_ni2p.xps`（11,379 B，sha256 `06d1db62c2e47094…`）就是被阻断的那组参数建出来的。现在 build 用 `path`+`peaks` 解出模型，按与 fit 完全相同的 `preflight()` 判 R²(扣背景)、四段残差、峰顶缺口；不过就**不驱动 XPSPeak、盘上不留 `.xps`**，文案与 fit 一致。
+- **force 与留痕**：只有显式 `force: true` 放行，回包写 `forced: true（未过门槛 N 项）`；`POST /xps/runlog` 的 run 对象新增 `forced` 与 `preflight` 明细，强制放行可事后核对。`.xps`/`.rpa` 源谱读不了谱表，回包明确写「优度预检未执行」。
+- **A：linear 背景适用性判据的测量结论**：四条真实谱、同一窗口（845.68–866.90）下，没有任何指标能把「适用的模板源谱」和「不适用的台阶谱」拉开 ≥10 倍——最好的残差倾斜/噪声是 0.31 vs 2.44/2.66（7.9×），`RMS(Shirley−弦)/峰高` 与台阶高度约 2.9×、总面积变化 2.2×；模板源谱自己在 linear↔shirley 下总面积也变 −7.35%，所以它不是物理平背景。结论：linear 只作为「谱自带 Background 列且该列确实是直线」的来源约束使用，默认建议 shirley，硬拦截靠上面的优度复算。
+- **背景口径与落盘那份谱一致**：`build_quality()` 默认先按 `window` 裁谱再重取背景端点（与 `do_build` 的 `crop=true` 同口径）。实测反例（runB2 同一组峰参数、`ni2p_cc.dat`）：全谱弦 r²=0.930191/rms=1610.6、窗口弦 r²=0.960379/rms=1215.6，后者与 fit 回包（残差 −73/69/190/−1604、缺口 10.9%）一字不差；用全谱弦会把第 4 段错报成 −1293。断言 G1 里加了弯曲基线夹具钉住这条。
+- 自检 126 → 129（G1 数值 + 窗口弦 / G2 接线 / G3 源码顺序与 schema）；三处变异各真红（删 build_quality 调用 → G2/G3；`preflight` 恒 ok → G1；关掉裁谱分支 → G1「裁剪后复算必须用窗口弦」）。
+
 ## 未发版修订（第十一批：lastRun、窗口下限、file 背景前置、临时谱清理、stale）
 
 版本仍 `2.8.0`。

@@ -1742,6 +1742,7 @@ def fake(exe, s, peaks, out, spec2=None, par=None, background=None, bg_type=None
             fh.write('%.4f\\t%.4f\\t%.4f\\t%.4f' % (e, raw[i], raw[i] - line[i], line[i]) + chr(10))
     return {'xps': out, 'xps_bytes': 1, 'peaks': [{'pos': p['pos'], 'fwhm': p['fwhm'], 'area': p['area']} for p in peaks]}
 M.D.build = fake
+M.build_quality = lambda *a, **k: (None, {'ok': True, 'errors': [], 'warnings': []})
 M.do_build({'path': src, 'peaks': [{'pos': 870.0, 'fwhm': 1.5, 'area': 20000.0, 'gl': 30}],
             'out': out_xps, 'spec': spec, 'expect_bg': 'linear', 'wlo': 1.0, 'whi': 3.0})
 print(json.dumps(cap, ensure_ascii=False))
@@ -1805,6 +1806,7 @@ def fake(exe, s, peaks, out, spec2=None, par=None, background=None, bg_type=None
             fh.write('%.4f\\t%.4f\\t%.4f\\t%.4f' % (e, raw[i], raw[i], 800 + (880 - e) * 20 + 5000.0) + chr(10))
     return {'xps': out, 'xps_bytes': 1, 'peaks': [{'pos': p['pos'], 'fwhm': p['fwhm'], 'area': p['area']} for p in peaks]}
 M.D.build = fake
+M.build_quality = lambda *a, **k: (None, {'ok': True, 'errors': [], 'warnings': []})
 msg = ''
 try:
     M.do_build({'path': src, 'peaks': [{'pos': 870.0, 'fwhm': 1.5, 'area': 20000.0, 'gl': 30}],
@@ -2089,6 +2091,129 @@ check('E6 P2-10 选中的模板被删 → selection 标 stale 并给原因', () 
 });
 
 await new Promise((r) => e16srv.close(r));
+
+process.stdout.write('\n[17] build 自己复算 fit 的门槛（B：fit 阻断的，build 也不许建）\n');
+
+check('G1 按给定峰参数复算：同参数 R²≈1 过闸，峰位整体 +3 eV 判阻断', () => {
+  if (!pyForGuards) {
+    process.stdout.write('  skip 找不到 python，跳过 build 优度复算\n');
+    return;
+  }
+  const out = JSON.parse(runPy(`
+import json, os, sys, tempfile
+sys.path.insert(0, 'server')
+import xps_fit as F, xpspeak_mcp as M
+E = [884.0 - 0.1 * i for i in range(391)]
+peaks = [dict(pos=852.884, fwhm=1.6, area=180000.0, gl=30),
+         dict(pos=855.6, fwhm=1.8, area=120000.0, gl=30),
+         dict(pos=859.5, fwhm=2.0, area=90000.0, gl=30),
+         dict(pos=861.0, fwhm=2.2, area=70000.0, gl=30)]
+model = [0.0] * len(E)
+for pk in peaks:
+    af = F.area_factor(pk["gl"] / 100.0)
+    h = pk["area"] / (pk["fwhm"] * af)
+    for i, e in enumerate(E):
+        model[i] += F.gl(e, pk["pos"], pk["fwhm"], h, pk["gl"] / 100.0)
+base = [5200.0 + (3000.0 - 5200.0) * (E[0] - e) / (E[0] - E[-1]) for e in E]
+raw = [base[i] + model[i] for i in range(len(E))]
+p = os.path.join(tempfile.gettempdir(), "bq_selftest.dat")
+with open(p, "w", encoding="utf-8", newline="\\n") as fh:
+    fh.write("BE Raw PeakSum Background\\n")
+    for i in range(len(E)):
+        fh.write("%.4f %.3f %.3f %.3f\\n" % (E[i], raw[i], model[i], base[i]))
+res, pf = M.build_quality(p, peaks, [845.68, 866.90], "file")
+bad = [dict(x, pos=x["pos"] + 3.0) for x in peaks]
+res2, pf2 = M.build_quality(p, bad, [845.68, 866.90], "file")
+# 背景口径：do_build 默认先把谱裁到窗口再载入，背景端点也要在窗口内重取。
+# 用一个弯曲的基线让「全谱弦」和「窗口弦」明显不同，钉住 build_quality 用的是窗口弦。
+curved = [base[i] + 900.0 * ((E[i] - 845.68) / 21.22) ** 2 for i in range(len(E))]
+raw2 = [curved[i] + model[i] for i in range(len(E))]
+p2 = os.path.join(tempfile.gettempdir(), "bq_selftest_curved.dat")
+with open(p2, "w", encoding="utf-8", newline="\\n") as fh:
+    fh.write("BE Raw\\n")
+    for i in range(len(E)):
+        fh.write("%.4f %.3f\\n" % (E[i], raw2[i]))
+res3, pf3 = M.build_quality(p2, peaks, [845.68, 866.90], "linear")
+idx = F._widx(E, 845.68, 866.90)
+Ew = [E[i] for i in idx]
+rw = [raw2[i] for i in idx]
+exp = F.assess_peaks(Ew, rw, F.linear_bg(Ew, rw), peaks, min(Ew), max(Ew))
+res4, pf4 = M.build_quality(p2, peaks, None, "linear")
+print(json.dumps({"r2": res["r2"], "ok": pf["ok"], "rms": res["rms"],
+                  "bad_r2": res2["r2"], "bad_ok": pf2["ok"],
+                  "bad_errs": pf2["errors"], "path": p,
+                  "win_rms": res3["rms"], "exp_rms": exp["rms"], "full_rms": res4["rms"]}))
+`));
+  assert.strictEqual(out.ok, true, JSON.stringify(out));
+  assert.ok(out.r2 > 0.999, `同参数复算 R² 必须≈1，实测 ${out.r2}`);
+  assert.strictEqual(out.bad_ok, false, '峰位整体偏 3 eV 必须判阻断');
+  assert.ok(out.bad_r2 < 0.85, `偏 3 eV 的 R² 必须 <0.85，实测 ${out.bad_r2}`);
+  assert.ok(out.bad_errs.some((e) => e.includes('R²(扣背景)')), JSON.stringify(out.bad_errs));
+  // 背景必须按窗口重取端点（与 do_build 裁谱后的实际谱同口径），不是全谱弦
+  assert.ok(Math.abs(out.win_rms - out.exp_rms) < 1e-6,
+    `裁剪后复算必须用窗口弦：build_quality ${out.win_rms} vs 期望 ${out.exp_rms}`);
+  assert.ok(Math.abs(out.full_rms - out.exp_rms) > 20,
+    `这组夹具必须让全谱弦与窗口弦拉开，否则断言没意义：${out.full_rms} vs ${out.exp_rms}`);
+});
+
+check('G2 do_build 复算到阻断：不驱动 XPSPeak、盘上不留 .xps；force=true 才放行并写 forced', () => {
+  if (!pyForGuards) {
+    process.stdout.write('  skip 找不到 python，跳过 do_build 接线\n');
+    return;
+  }
+  const out = JSON.parse(runPy(`
+import json, os, sys, tempfile
+sys.path.insert(0, 'server')
+import xpspeak_mcp as M
+p = os.path.join(tempfile.gettempdir(), "bq_selftest.dat")
+out = os.path.join(tempfile.gettempdir(), "bq_selftest.xps")
+for f in (out,):
+    if os.path.exists(f):
+        os.remove(f)
+calls = []
+def fake(exe, used, peaks, out_path, verify, par, bg_flag, bg_type):
+    calls.append(1)
+    with open(out_path, "wb") as fh:
+        fh.write(b"x")
+    return {"xps": out_path, "xps_bytes": 1, "peaks": peaks}
+M.D.build = fake
+M.build_quality = lambda *a, **k: (None, {"ok": False,
+    "errors": ["R²(扣背景)=0.4000 < 0.85：残差与信号同量级"], "warnings": []})
+peaks = [dict(pos=852.884, fwhm=1.6, area=180000.0, gl=30)]
+args = dict(path=p, peaks=peaks, out=out, bg=False, window=[845.68, 866.90],
+            wlo=1.0, whi=5.0)
+blocked, tf = "NO-RAISE", None
+try:
+    M.do_build(dict(args))
+except ValueError as exc:
+    blocked = str(exc)
+n_block, exists_block = len(calls), os.path.exists(out)
+try:
+    tf = M.do_build(dict(args, force=True))
+except ValueError as exc:
+    tf = "RAISE:" + str(exc)
+print(json.dumps({"blocked": blocked, "calls_block": n_block, "exists_block": exists_block,
+                  "forced_calls": len(calls), "forced_exists": os.path.exists(out),
+                  "forced_txt": tf if isinstance(tf, str) else ""}))
+`));
+  assert.ok(out.blocked.includes('已阻断保存'), out.blocked);
+  assert.ok(out.blocked.includes('XPSPeak 未被驱动'), out.blocked);
+  assert.strictEqual(out.calls_block, 0, '阻断时不许调用 D.build');
+  assert.strictEqual(out.exists_block, false, '阻断时盘上不许有 .xps');
+  assert.strictEqual(out.forced_calls, 1, 'force=true 才允许驱动 XPSPeak');
+  assert.ok(out.forced_txt.includes('forced: true'), out.forced_txt);
+  assert.ok(out.forced_txt.includes('R²(扣背景)'), 'force 回包必须原样列出未过门槛');
+});
+
+check('G3 源码顺序与 schema：build_quality 在 D.build 之前，工具含 force 参数', () => {
+  const iQuality = MCP_SRC.indexOf('build_quality(used, peaks, win, expect, crop_used)');
+  const iBuild = MCP_SRC.indexOf('r = D.build(');
+  assert.ok(iQuality > 0, '找不到 build_quality 调用');
+  assert.ok(iBuild > 0, '找不到 D.build 调用');
+  assert.ok(iQuality < iBuild, '优度复算必须在 D.build 之前');
+  assert.ok(/"force": \{"type": "boolean"/.test(MCP_SRC), 'xpspeak_build schema 必须暴露 force');
+  assert.ok(MCP_SRC.includes('forced: true（未过门槛'), 'force 回包必须带可核对的 forced 行');
+});
 
 /* ───────── 结果 ───────── */
 

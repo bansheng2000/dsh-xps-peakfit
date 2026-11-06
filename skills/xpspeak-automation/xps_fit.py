@@ -410,6 +410,50 @@ def bg_shape_check(bgcol, height, tol=BG_SHAPE_TOL):
                 pct_of_height=round(100.0 * mx / float(height), 2) if height else None)
 
 
+def assess_peaks(E, raw, bg, peaks, lo, hi):
+    """按**给定**峰参数（不再优化）复算 fit 的优度结构，供 build 在落盘前复用 preflight()。
+
+    与 fit() 的口径逐项对齐：target = raw - bg（扣背景）、r2 用扣背景口径、r2_raw 只作信息、
+    残差按窗口等分四段、峰顶缺口 = max|data-fit| / max(target)。
+    peaks: [{"pos","fwhm","area","gl"}]，gl 可以是 0-100 的百分数或 0-1 的分数。
+    返回的 dict 里**没有** bound / not_optimized：build 的参数是人给的、不是拟合出来的，
+    那两条闸由 build_guard 单独管（顶到 wlo/whi 同样拒绝保存）。
+    """
+    idx = _widx(E, lo, hi)
+    if len(idx) < 10:
+        raise ValueError("窗口 %.2f-%.2f eV 内只有 %d 点，无法评估优度" % (lo, hi, len(idx)))
+    E2 = [E[i] for i in idx]
+    raw2 = [raw[i] for i in idx]
+    bg2 = [bg[i] for i in idx] if bg else [0.0] * len(idx)
+    target = [raw2[i] - bg2[i] for i in range(len(idx))]
+    model = [0.0] * len(idx)
+    comps = []
+    for pk in peaks:
+        c, w, area = float(pk["pos"]), float(pk["fwhm"]), float(pk["area"])
+        g = float(pk.get("gl", pk.get("eta", 30.0)))
+        eta = g / 100.0 if g > 1.0 else g
+        af = area_factor(eta)
+        h = area / (w * af) if w > 0 and af > 0 else 0.0
+        for i, x in enumerate(E2):
+            model[i] += gl(x, c, w, h, eta)
+        comps.append(dict(center=round(c, 4), partner=round(c, 4), fwhm=round(w, 4),
+                          height=round(h, 1), area=round(h * w * af, 1), eta=eta))
+    resid = [target[i] - model[i] for i in range(len(idx))]
+    n = len(idx)
+    sse = sum(v * v for v in resid)
+    mean_t = sum(target) / n
+    sst = sum((t - mean_t) ** 2 for t in target)
+    mean_raw = sum(raw2) / n
+    sst_raw = sum((v - mean_raw) ** 2 for v in raw2)
+    return dict(nc=len(peaks), n=n, k=3 * len(peaks),
+                rms=round(math.sqrt(sse / n), 2),
+                r2=round(1.0 - sse / sst, 6) if sst else None,
+                r2_raw=round(1.0 - sse / sst_raw, 6) if sst_raw else None,
+                comps=comps, bound=[], not_optimized=[],
+                window=dict(lo=lo, hi=hi), peak_max=round(max(target), 1),
+                curves=dict(E=E2, target=target, fit=model, resid=resid))
+
+
 def preflight(res, E=None, bg_used=None, expect_bg=None, edge_ratio=3.0, bg_col=None):
     """保存/建区域前的**硬前置**：不通过就不许落盘。
 

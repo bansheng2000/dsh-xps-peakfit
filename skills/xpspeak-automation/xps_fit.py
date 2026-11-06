@@ -33,6 +33,22 @@ BOUND_REL = 1e-6
 BOUND_NAMES = ("center", "fwhm", "height")
 BOUND_LABELS = ("峰位", "FWHM", "峰高")
 
+# —— 拟合可信度的四道门（阈值依据见 SKILL.md「校验链」一节）——
+# R²：0.90 / 0.85 这两档来自实测产物（模板搬移那种"只调高度"的拟合 R²≈0.874）。
+#   0.90 以上才配叫"拟合得像"；0.85 以下残差已经和信号同量级，模型与数据不是一件事。
+R2_WARN = 0.90
+R2_BLOCK = 0.85
+# 残差按窗口四段取均值：任一段 |均值| > 0.5×rms 说明残差不是随机的，是系统性偏移
+#   （实测那份第二段 1.22×rms：四段均值 -1131 / -2590 / -808 / -174 cps，rms 2116）。
+RESID_SEG_RATIO = 0.5
+RESID_SEGMENTS = 4
+# 峰顶缺口：max|data-fit| / 峰高。实测 6070/60963 = 10.0%，正好在阻断线上。
+PEAK_GAP_WARN = 0.05
+PEAK_GAP_BLOCK = 0.10
+# 背景形状：linear 模板时，导出谱的 Background 列必须真的是一条直线。
+#   容差 0.5% 峰高 —— 实测那份台阶背景偏离 +2567/-2872 = 峰高 26352 的 10.9%，远超这条线。
+BG_SHAPE_TOL = 0.005
+
 
 def load(path, bg_col=4):
     """读谱图：空白/逗号分隔的数值表。列序 = BE, Raw, [PeakSum], [Background], ...
@@ -236,6 +252,7 @@ def fit(E, raw, bg, centers, ds=1.18, ratio=0.5, eta=0.3,
     # 若 LM 一次都不接受步进，p 就停在界外、撞界检查（只比 p 与界）也发现不了 ——
     # 结果是「参数越界但 res["bound"] 为空」，preflight 会放行一份不可信的结果。
     p = clamp(p)
+    p0 = list(p)            # 初值（clamp 之后）：preflight 用它抓「初值就是终值、参数根本没动」
 
     def resid(q):
         return [target[i] - model_at(E[i], q, nc, ds, ratio, eta) for i in range(len(E))]
@@ -298,6 +315,17 @@ def fit(E, raw, bg, centers, ds=1.18, ratio=0.5, eta=0.3,
                                   side=side, value=float(v), limit=float(lim)))
                 atb.setdefault(i, []).append(BOUND_NAMES[f])
                 break
+    # 未优化参数：终值与初值（clamp 后）完全一致、且不在边界上 —— 等于写死，不是拟合出来的。
+    # 与撞界的区别：撞界的值由约束决定（已顶到界），这里抓的是 LM 一步都没接受、参数纹丝不动。
+    not_opt = []
+    for j, v in enumerate(p):
+        if abs(v - p0[j]) >= 1e-6:
+            continue
+        at_bound = any(abs(v - lim) <= BOUND_REL * max(1.0, abs(lim)) for lim in (lo[j], hi[j]))
+        if not at_bound:
+            i, f = divmod(j, 3)
+            not_opt.append(dict(comp=i + 1, param=BOUND_NAMES[f], label=BOUND_LABELS[f],
+                                value=float(v), init=float(p0[j])))
     mean_t = sum(target) / n
     sst = sum((t - mean_t) ** 2 for t in target)
     comps = []
@@ -327,20 +355,65 @@ def fit(E, raw, bg, centers, ds=1.18, ratio=0.5, eta=0.3,
                 rms=round(math.sqrt(sse / n), 2), r2=round(1.0 - sse / sst, 6) if sst else None,
                 aic=round(n * math.log(sse / n) + 2 * k, 2), sse=round(sse, 2),
                 comps=comps, params=[float(v) for v in p], params_err=[round(v, 6) for v in sig], bound=bound,
+                p0=[float(v) for v in p0], not_optimized=not_opt,
                 warnings=_constraint_warnings(centers, ds, ratio),
                 window=dict(lo=win[0], hi=win[1]), n_points=len(E),
                 limits=dict(ctol=ctol, wlo=wlo, whi=whi, hmax=hmax), peak_max=round(max(target), 1),
                 curves=dict(E=E, target=target, fit=[target[i] - r[i] for i in range(n)], resid=r))
 
 
-def preflight(res, E=None, bg_used=None, expect_bg=None, edge_ratio=3.0):
+def resid_segments(res, nseg=RESID_SEGMENTS):
+    """残差按窗口等分 nseg 段，返回每段均值（最后一段吃掉除不尽的余数）。"""
+    r = (res.get("curves") or {}).get("resid") or []
+    if len(r) < nseg:
+        return []
+    step = len(r) // nseg
+    out = []
+    for k in range(nseg):
+        seg = r[k * step:(k + 1) * step] if k < nseg - 1 else r[k * step:]
+        out.append(sum(seg) / len(seg))
+    return out
+
+
+def peak_gap_ratio(res):
+    """峰顶缺口：max|data − fit| / 峰高（扣背景后的峰顶）。峰高未知返回 None。"""
+    resid = (res.get("curves") or {}).get("resid") or []
+    pm = res.get("peak_max")
+    if not resid or not pm:
+        return None
+    return max(abs(v) for v in resid) / float(pm)
+
+
+def bg_shape_check(bgcol, height, tol=BG_SHAPE_TOL):
+    """linear 模板专用：导出的 Background 列是否真是一条直线（两端点连线）。
+
+    只看「拟合用了哪种背景」不够：XPSPeak 保存/建区域时可能沿用源谱自带背景，
+    于是图上是直线、文件里是台阶（实测 857.0 偏 +2567、851.0 偏 −2872 = 峰高 26352 的 10.9%）。
+    容差 tol×峰高；超了就是「文件里的背景与拟合用的不是同一件事」。
+    """
+    vals = [float(v) for v in (bgcol or [])]
+    n = len(vals)
+    if n < 3:
+        return dict(ok=True, reason="背景列不足 3 点，跳过")
+    y0, y1 = vals[0], vals[-1]
+    devs = [abs(vals[i] - (y0 + (y1 - y0) * i / (n - 1))) for i in range(n)]
+    mx = max(devs)
+    lim = tol * max(1.0, float(height or 0.0))
+    return dict(ok=mx <= lim, max_dev=round(mx, 1), at_index=devs.index(mx), limit=round(lim, 1),
+                pct_of_height=round(100.0 * mx / float(height), 2) if height else None)
+
+
+def preflight(res, E=None, bg_used=None, expect_bg=None, edge_ratio=3.0, bg_col=None):
     """保存/建区域前的**硬前置**：不通过就不许落盘。
 
-    三条（缺一条都可能存出一份「看着完整、其实不可信」的 .xps）：
+    六条（缺一条都可能存出一份「看着完整、其实不可信」的 .xps）：
       1. 撞界：res["bound"] 非空 → 参数顶在边界上，值是约束决定的、不是数据拟合出来的；
       2. 背景不一致：模板说 linear、实际用了谱图自带（或反之）→ `background` 字段只影响拟合，
          不影响保存文件里的背景，两者对不上时结论与图就不是一件事；
-      3. 边界截断：峰心距谱两端 < edge_ratio×FWHM → 尾部被切掉，面积只是当前窗口的积分。
+      3. 边界截断：峰心距谱两端 < edge_ratio×FWHM → 尾部被切掉，面积只是当前窗口的积分；
+      4. 未优化参数：终值 = 初值且不在界上 → 参数根本没动，等于写死；
+      5. 优度与残差结构：R² < 0.85 阻断、< 0.90 警告；残差四段任一段 |均值| > 0.5×rms 阻断（系统性偏移）；
+      6. 峰顶缺口：max|data−fit|/峰高 > 10% 阻断、> 5% 警告；linear 模板还要核「文件里的背景列是不是直线」。
 
     返回 {"ok": bool, "errors": [...], "warnings": [...]}。errors 非空 → 调用方必须中止、不写文件。
     """
@@ -357,6 +430,45 @@ def preflight(res, E=None, bg_used=None, expect_bg=None, edge_ratio=3.0):
         else:
             errors.append("背景不一致：模板要求 %s，实际用了 %s。`background` 字段只管拟合，不改变保存文件里的背景。"
                           % (expect_bg, bg_used))
+
+    if res.get("not_optimized"):
+        items = "；".join("组分%d %s=%g（初值 %g）" % (x["comp"], x["label"], x["value"], x["init"])
+                          for x in res["not_optimized"])
+        errors.append("参数未被优化（初值=终值且不在界上）：%s —— 这几项等于写死，不是拟合出来的，不能出结论。"
+                      % items)
+
+    r2 = res.get("r2")
+    if r2 is not None:
+        if r2 < R2_BLOCK:
+            errors.append("R²=%.4f < %.2f：残差与信号同量级，模型与数据不是一件事，不能出结论。" % (r2, R2_BLOCK))
+        elif r2 < R2_WARN:
+            warnings.append("R²=%.4f < %.2f：优度不足，结论只能标「不足以判定」并写清缺什么。" % (r2, R2_WARN))
+
+    segs = resid_segments(res)
+    rms = float(res.get("rms") or 0.0)
+    if segs and rms > 0:
+        bad = [i + 1 for i, m in enumerate(segs) if abs(m) > RESID_SEG_RATIO * rms]
+        if bad:
+            errors.append("残差按窗口 %d 段取均值：%s；第 %s 段 |均值| > %.1f×rms(%.1f) —— 系统性偏移，"
+                          "模型与数据不是一件事。"
+                          % (len(segs), " / ".join("%.0f" % m for m in segs),
+                             "、".join(str(i) for i in bad), RESID_SEG_RATIO, rms))
+
+    gap = peak_gap_ratio(res)
+    if gap is not None:
+        if gap > PEAK_GAP_BLOCK:
+            errors.append("峰顶缺口 %.1f%% > %.0f%%：max|data−fit| / 峰高 过大，峰形没对上"
+                          "（常见于把模板峰形搬过去只调高度）。" % (100.0 * gap, 100.0 * PEAK_GAP_BLOCK))
+        elif gap > PEAK_GAP_WARN:
+            warnings.append("峰顶缺口 %.1f%% > %.0f%%：峰顶差得偏多，面积与峰高要打折看。"
+                            % (100.0 * gap, 100.0 * PEAK_GAP_WARN))
+
+    if expect_bg == "linear" and bg_col:
+        bs = bg_shape_check(bg_col, res.get("peak_max"))
+        if not bs.get("ok"):
+            errors.append("背景形状不符：模板是 linear，但导出谱 Background 列偏离两端直线 %.0f cps"
+                          "（第 %d 点，= 峰高 %.1f%%，容差 %.2f%%）—— 文件里的背景不是拟合用的那条直线。"
+                          % (bs["max_dev"], bs["at_index"], bs["pct_of_height"] or 0.0, 100.0 * BG_SHAPE_TOL))
 
     if E:
         lo, hi = min(E), max(E)

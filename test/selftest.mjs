@@ -648,7 +648,7 @@ sys.path.insert(0, 'server')
 import xps_fit as F
 from xpspeak_mcp import build_guard
 E = [880 - 0.05 * i for i in range(600)]
-raw = [45000 * math.exp(-((e - 856.5) ** 2) / (2 * 0.5 ** 2)) + 10 for e in E]
+raw = [F.model_at(e, [856.7, 1.177, 30000.0], 1, 0.0, 0.0, 0.3) + 10.0 for e in E]
 res = F.fit(E, raw, [10.0] * len(E), [856.5], ds=0.0, ratio=0.0, eta=0.3, wlo=1.5, whi=2.4, ctol=1.0)
 pf = F.preflight(res, E=E)
 out = os.path.join(tempfile.mkdtemp(), 'should-not-exist.xps')
@@ -704,7 +704,7 @@ except ValueError as e:
     bad = '背景不一致' in str(e)
 tg = build_guard(peaks, 'tougaard', 'file', None, None)
 E = [880 - 0.05 * i for i in range(600)]
-raw = [45000 * math.exp(-((e - 856.5) ** 2) / (2 * 0.5 ** 2)) + 10 for e in E]
+raw = [F.model_at(e, [856.7, 1.177, 30000.0], 1, 0.0, 0.0, 0.3) + 10.0 for e in E]
 res = F.fit(E, raw, [10.0] * len(E), [856.5], ds=0.0, ratio=0.0, eta=0.3, wlo=0.6, whi=4.0, ctol=1.0)
 pf = F.preflight(res, bg_used='file', expect_bg='tougaard')
 ok_same = F.preflight(res, bg_used='linear', expect_bg='linear')['ok']
@@ -736,6 +736,127 @@ print(json.dumps({'near': _edge_warnings(p, [{'pos': 850.4, 'fwhm': 1.0}]),
   assert.ok(r.near.length > 0, '贴近边界必须警告');
   assert.ok(r.near[0].includes('尾部被截断'), '警告要说明尾部被截断');
   assert.deepEqual(r.far, [], '远离边界不该报');
+});
+
+check('⑫ 未优化参数（初值=终值且不在界上）→ preflight 阻断；真拟合不会误报', () => {
+  const out = runPy(`
+import json, math, sys
+sys.path.insert(0, 'server')
+import xps_fit as F
+E = [880 - 0.05 * i for i in range(600)]
+raw = [F.model_at(e, [856.7, 1.177, 30000.0], 1, 0.0, 0.0, 0.3) + 10.0 for e in E]
+res = F.fit(E, raw, [10.0] * len(E), [856.5], ds=0.0, ratio=0.0, eta=0.3, ctol=1.0)
+fake = dict(res)
+fake['not_optimized'] = [{'comp': 1, 'param': 'height', 'label': 'height', 'value': 45000.0, 'init': 45000.0}]
+pf = F.preflight(fake, E=E)
+print(json.dumps({'p0_len': len(res.get('p0') or []), 'real_not_opt': res['not_optimized'],
+                  'pf_ok': pf['ok'], 'errs': pf['errors'], 'real_pf_ok': F.preflight(res, E=E)['ok']}))
+`);
+  const r = JSON.parse(out);
+  assert.equal(r.p0_len, 3, 'fit 必须记下每个参数的初值（3 个/组分）');
+  assert.deepEqual(r.real_not_opt, [], '真拟合里参数都动过，不该误报未优化');
+  assert.equal(r.pf_ok, false, '参数没动必须阻断');
+  assert.ok(r.errs.some((e) => e.includes('未被优化')), '错误里要写明「参数未被优化」');
+  assert.equal(r.real_pf_ok, true, '同一份真拟合不许被这条误拦');
+});
+
+check('⑬ 优度：R² 0.874 → 警告；0.80 → 阻断', () => {
+  const out = runPy(`
+import json, math, sys
+sys.path.insert(0, 'server')
+import xps_fit as F
+E = [880 - 0.05 * i for i in range(600)]
+raw = [F.model_at(e, [856.7, 1.177, 30000.0], 1, 0.0, 0.0, 0.3) + 10.0 for e in E]
+res = F.fit(E, raw, [10.0] * len(E), [856.5], ds=0.0, ratio=0.0, eta=0.3, ctol=1.0)
+lo = dict(res); lo['r2'] = 0.874
+bad = dict(res); bad['r2'] = 0.80
+p1, p2 = F.preflight(lo, E=E), F.preflight(bad, E=E)
+print(json.dumps({'warn_ok': p1['ok'], 'warn': [w for w in p1['warnings'] if 'R' in w],
+                  'block_ok': p2['ok'], 'errs': p2['errors']}))
+`);
+  const r = JSON.parse(out);
+  assert.equal(r.warn_ok, true, '0.874 落在警告区，不该阻断');
+  assert.ok(r.warn.length > 0, '0.874 必须给 R² 警告');
+  assert.equal(r.block_ok, false, '0.80 必须阻断');
+  assert.ok(r.errs.some((e) => e.includes('R²')), '阻断理由要写 R²');
+});
+
+check('⑭ 残差四段结构：某段 |均值| > 0.5×rms → 系统性偏移阻断', () => {
+  const out = runPy(`
+import json, sys
+sys.path.insert(0, 'server')
+import xps_fit as F
+def mk(resid, rms):
+    return {'bound': [], 'not_optimized': [], 'r2': 0.99, 'rms': rms, 'peak_max': 100000.0,
+            'comps': [], 'curves': {'E': [0, 1], 'target': [1, 0], 'fit': [], 'resid': resid}}
+n = 400
+flat = [0.0] * n
+flat[100:200] = [3000.0] * 100          # 第二段整体偏 3000，rms=1000 → 3×rms
+ok = F.preflight(mk([1.0 if i % 2 else -1.0 for i in range(n)], 1.0))
+bad = F.preflight(mk(flat, 1000.0))
+print(json.dumps({'rand_ok': ok['ok'], 'bad_ok': bad['ok'], 'errs': bad['errors'],
+                  'segs': F.resid_segments(mk(flat, 1000.0))}))
+`);
+  const r = JSON.parse(out);
+  assert.equal(r.rand_ok, true, '随机残差不该报结构问题');
+  assert.equal(r.bad_ok, false, '某段整体偏移必须阻断');
+  assert.ok(r.errs.some((e) => e.includes('系统性偏移')), '错误里要写「系统性偏移」');
+  assert.equal(r.segs.length, 4, '残差要按四段统计');
+  assert.ok(Math.abs(r.segs[1]) > 2000, `第二段均值应≈3000，实测 ${r.segs[1]}`);
+});
+
+check('⑮ 峰顶缺口：max|data−fit|/峰高 6% → 警告；12% → 阻断', () => {
+  const out = runPy(`
+import json, sys
+sys.path.insert(0, 'server')
+import xps_fit as F
+def mk(spike, rms):
+    resid = [0.0] * 400
+    resid[200] = spike
+    return {'bound': [], 'not_optimized': [], 'r2': 0.99, 'rms': rms, 'peak_max': 100000.0,
+            'comps': [], 'curves': {'E': [0, 1], 'target': [1, 0], 'fit': [], 'resid': resid}}
+w = F.preflight(mk(6000.0, 300.0))
+b = F.preflight(mk(12000.0, 600.0))
+print(json.dumps({'warn_ok': w['ok'], 'w': w['warnings'], 'block_ok': b['ok'], 'errs': b['errors'],
+                  'ratio': F.peak_gap_ratio(mk(6000.0, 300.0))}))
+`);
+  const r = JSON.parse(out);
+  assert.equal(r.warn_ok, true, '6% 只是警告，不该阻断');
+  assert.ok(r.w.some((x) => x.includes('峰顶缺口')), '6% 必须给峰顶缺口警告');
+  assert.equal(r.block_ok, false, '12% 必须阻断');
+  assert.ok(r.errs.some((x) => x.includes('峰顶缺口')), '阻断理由要写峰顶缺口');
+  assert.ok(Math.abs(r.ratio - 0.06) < 1e-6, '缺口比 = max|resid|/峰高');
+});
+
+check('⑯ 背景形状：linear 模板下 Background 列必须是直线（台阶 → 阻断）', () => {
+  const out = runPy(`
+import json, sys
+sys.path.insert(0, 'server')
+import xps_fit as F
+n = 200
+lin = [30000.0 + 100.0 * i for i in range(n)]
+step = [30000.0 if i < 100 else 35000.0 for i in range(n)]
+a = F.bg_shape_check(lin, 26000.0)
+b = F.bg_shape_check(step, 26000.0)
+res = {'bound': [], 'not_optimized': [], 'r2': 0.99, 'rms': 1.0, 'peak_max': 26000.0,
+       'comps': [], 'curves': {'E': [0, 1], 'target': [1, 0], 'fit': [], 'resid': [0.0, 0.0]}}
+p_lin = F.preflight(res, expect_bg='linear', bg_col=lin)
+p_step = F.preflight(res, expect_bg='linear', bg_col=step)
+print(json.dumps({'lin_ok': a['ok'], 'step_ok': b['ok'], 'step_dev': b['max_dev'],
+                  'step_pct': b['pct_of_height'], 'p_lin_ok': p_lin['ok'], 'p_step_ok': p_step['ok'],
+                  'errs': p_step['errors']}))
+`);
+  const r = JSON.parse(out);
+  assert.equal(r.lin_ok, true, '真直线背景不许被拦');
+  assert.equal(r.step_ok, false, '台阶背景必须判不符');
+  assert.ok(r.step_dev > 2400, `台阶最大偏离应≈4950，实测 ${r.step_dev}`);
+  assert.ok(r.step_pct > 9, '偏离应写成峰高的百分比（实测 10.9%）');
+  assert.equal(r.p_lin_ok, true, 'preflight 里直线背景放行');
+  assert.equal(r.p_step_ok, false, 'preflight 里台阶背景阻断');
+  assert.ok(r.errs.some((e) => e.includes('背景形状')), '错误里要写「背景形状不符」');
+  const body = MCP_SRC.slice(MCP_SRC.indexOf('def do_build('), MCP_SRC.indexOf('def do_close('));
+  assert.ok(body.indexOf('_bg_guard_spec(') > 0 && body.indexOf('os.remove(out)') > 0,
+    'build 收尾必须核背景形状，不符即删掉刚写出的 .xps（不落盘）');
 });
 
 /* ───────── 结果 ───────── */

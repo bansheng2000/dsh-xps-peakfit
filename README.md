@@ -70,6 +70,8 @@ XPS 分峰拟合 SOP —— 一个给 AI agent 用的 skill（Agent Skills 目�
 
 **「用这个」只产出结构化指令**（模板字段 + 建议调用顺序 + `notes`），交 agent 执行；参数一律落在 `xpspeak_fit`（`centers`/`ds`/`ratio`/`wlo`/`whi`/`bg`/`eta`/`ctol`；`ctol` 取各峰 `search_ev` 最大值），**Add Peak 是菜单命令、不接收位置与宽度参数**，别指望它带参数建峰；服务端**从不**调 MCP、不驱动 XPSPeak。模板缺 `eta` 时 `use` 仍 200，但 `instruction.warnings` 会写明「已按 0.3 拟合」。教学模式（`~/.dsh/dsh-xps-peakfit/mode.json`，与 MCP 同一份真源）下按钮禁用，且服务端同样返回 403 —— 前端禁用只是体验，闸门在服务端。
 
+**保存前校验链**：`server/xps_fit.py:preflight()` 与 `server/xpspeak_mcp.py:build_guard()` 在落盘前判七条——撞界、背景不一致、未优化参数（初值=终值）、R²<0.85、残差四段任一段 >0.5×rms、峰顶缺口 >10%、linear 模板的 Background 列偏离直线 >0.5% 峰高；任一 errors 即阻断（build 侧会删掉刚写出的 `.xps`）。阈值常量在 `server/xps_fit.py` 顶部，依据写在 `SKILL.md`「保存前的校验链」一节。
+
 **选择态（一键化入口）**：面板主按钮「选这个」把 `{templateId, spectrumPath}` 写进 `~/.dsh/dsh-xps-peakfit/selection.json`（`GET/POST /xps/selection`，`templateId: null` = 取消选择），选中卡片高亮、顶部显示「已选：xxx → 谱图路径」，并提供「取消选择」。用户说一句「按模板做」，agent 就读它一次跑完（`xpspeak_open` → `xpspeak_fit` → 过硬前置 → `export`/`save`）；撞界 / 背景不一致 / 边界截断任一出现就停下，并把原因写回 `selection.lastRun`。`use` 路由保留向后兼容；教学档两处都禁用且服务端 403。
 
 数据目录：`~/.dsh/dsh-xps-peakfit/`（`templates/<id>/meta.json`、`favorites.json`、`mode.json`、`server/`）。pnpm 重装 node_modules 不会清这里。

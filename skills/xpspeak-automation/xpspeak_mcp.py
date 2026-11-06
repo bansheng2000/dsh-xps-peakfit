@@ -476,6 +476,27 @@ def _edge_warnings(path, peaks, ratio=3.0):
     return out
 
 
+def _bg_guard_spec(spec):
+    """linear 模板的收尾核对：导出谱里的 Background 列必须真是一条直线。
+
+    拟合与报告用的是直线背景，但 XPSPeak 保存/建区域可能沿用源谱自带背景 ——
+    实测那份 .xps 的背景是台阶（857.0 偏 +2567、851.0 偏 −2872 = 峰高 10.9%），
+    图上是直线、文件里是台阶，别人重开会得到不同数字。容差 0.5% 峰高。
+    返回 None 表示没有可核的背景列。
+    """
+    E, raw, bg, _ncol = F.load(spec)
+    if not bg:
+        return None
+    height = max(raw[i] - bg[i] for i in range(len(raw)))
+    bs = F.bg_shape_check(bg, height)
+    if not bs.get("ok"):
+        raise ValueError("⛔ 背景形状不符：模板是 linear，但导出谱的 Background 列偏离两端直线 %.0f cps"
+                         "（= 峰高 %.1f%%，容差 %.2f%%）—— 文件里的背景不是拟合用的那条直线。"
+                         "先在软件里重扣直线背景再 build。"
+                         % (bs["max_dev"], bs["pct_of_height"] or 0.0, 100.0 * F.BG_SHAPE_TOL))
+    return bs
+
+
 def do_build(a):
     """一次调用把一组峰参数落成可交付的 .xps（不需要人点 GUI）。
 
@@ -492,6 +513,18 @@ def do_build(a):
     edge = _edge_warnings(a["path"], peaks)
     r = D.build(EXE, a["path"], peaks, out, spec, par, a.get("bg"))
     txt = "已生成 %s（%d 字节）" % (r["xps"], r["xps_bytes"])
+    bg_ok = None
+    if spec and a.get("expect_bg") == "linear":
+        try:
+            bg_ok = _bg_guard_spec(spec)
+        except ValueError as exc:
+            try:                                   # 不落盘：刚写出的 .xps 立刻删掉
+                os.remove(out)
+            except OSError:
+                pass
+            raise ValueError("%s（已删除本次写出的 %s）" % (exc, out))
+        if bg_ok:
+            txt += "\n背景形状: 直线（最大偏离 %.0f cps，容差 %.0f cps）" % (bg_ok["max_dev"], bg_ok["limit"])
     if edge:
         txt = "\n".join(edge) + "\n" + txt
     if spec:

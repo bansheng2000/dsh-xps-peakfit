@@ -30,6 +30,7 @@ import {
   renameTemplate,
   sha256,
   selectionFile,
+  spectrumRange,
   validateChargeCorrection,
   stateRoot,
   thumbSvg,
@@ -1955,6 +1956,139 @@ check('D4 审计核 run.json：产物改一个字节 → artifacts-modified fail
   assert.match(uc.detail, /没有交付凭证/);
   assert.equal(noCreds.verdict, 'warn');
 });
+
+
+/* ── 第十一批：P1-5/6/7/8、P2-9/10 ── */
+
+const e16root = join(tmp, 'e16');
+mkdirSync(e16root, { recursive: true });
+const e16tpl = createTemplate({
+  ...GOOD,
+  name: 'E16 lastRun',
+  fit_window_ev: { lo: 227, hi: 232 },
+  charge_correction_ev: null,
+}, e16root);
+const e16srv = createServer(createRoutes({ root: e16root, env: { ...process.env, XPSPEAK_ROOT: e16root, XPSPEAK_MODE: '', XPSPEAK_MODE_FILE: '' } }));
+await new Promise((r) => e16srv.listen(0, '127.0.0.1', r));
+const e16port = e16srv.address().port;
+
+const e16be = [];
+for (let x = 227; x <= 232.01; x += 0.2) e16be.push(Number(x.toFixed(2)));
+const e16lines = e16be.map((x) => `${x} ${(1000 + 800 * Math.exp(-((x - 229) ** 2) / 0.1)).toFixed(3)}`);
+const e16spec2 = join(e16root, 'two.dat');
+writeFileSync(e16spec2, `${e16lines.join('\n')}\n`, 'utf8');
+const e16spec3 = join(e16root, 'three.dat');
+writeFileSync(e16spec3, `${e16lines.map((l) => `${l} 120.000`).join('\n')}\n`, 'utf8');
+
+const e16use = await request(e16port, `/xps/templates/${e16tpl.template.id}/use`, {
+  method: 'POST',
+  body: JSON.stringify({ spectrumPath: e16spec2 }),
+});
+const e16sel1 = await request(e16port, '/xps/selection');
+const e16run = await request(e16port, '/xps/runlog', {
+  method: 'POST',
+  body: JSON.stringify({ dir: e16root, templateId: e16tpl.template.id, files: [e16spec2], result: { r2: 0.9876 } }),
+});
+const e16sel2 = await request(e16port, '/xps/selection');
+const e16aud = await request(e16port, '/xps/audit', {
+  method: 'POST',
+  body: JSON.stringify({ spectrumPath: b3spec, peaksPath: b3peaks }),
+});
+const e16sel3 = await request(e16port, '/xps/selection');
+
+check('E1 P1-5 lastRun 真有写入者：use→audit→runlog 各写一次，字段可读', () => {
+  assert.equal(e16use.status, 200, JSON.stringify(e16use.json));
+  const l1 = e16sel1.json.selection.lastRun;
+  assert.ok(l1, 'use 之后 lastRun 不许还是 null');
+  assert.equal(l1.kind, 'use');
+  assert.equal(l1.status, 'ok');
+  assert.equal(l1.templateId, e16tpl.template.id);
+  assert.equal(Number.isFinite(Date.parse(l1.at)), true, `at 必须是可解析时间：${l1.at}`);
+
+  assert.equal(e16aud.status, 200, JSON.stringify(e16aud.json));
+  const l2 = e16sel3.json.selection.lastRun;
+  assert.equal(l2.kind, 'audit', JSON.stringify(l2));
+  assert.equal(l2.status, e16aud.json.verdict);
+  assert.equal(l2.templateId, null, '没带 templateId 的审计，lastRun 不许挂上一个猜出来的模板');
+
+  assert.equal(e16run.status, 200, JSON.stringify(e16run.json));
+  const l3 = e16sel2.json.selection.lastRun;
+  assert.equal(l3.kind, 'runlog', JSON.stringify(l3));
+  assert.equal(l3.runPath, join(e16root, 'run.json'));
+  assert.equal(l3.r2, 0.9876, 'runlog 的 result.r2 要落进 lastRun');
+  assert.equal(l3.status, 'delivered');
+});
+
+check('E2 P1-6 窗口交集有下限：18 eV 交集对 3×fwhm_max=19.5 eV 必须 422 并报两个数', () => {
+  const t = {
+    ...GOOD,
+    fwhm_max: 6.5,
+    fit_window_ev: { lo: 0, hi: 20 },
+    peak_windows: [{ label: 'x', center_ev: 10 }],
+  };
+  const r = useInstruction(t, 'exec', { lo: 2, hi: 20 });
+  assert.equal(r.ok, false, '这么窄的交集不许放行');
+  assert.equal(r.code, 'window-too-narrow');
+  assert.match(r.message, /18\.00 eV/, '要写交集宽度');
+  assert.match(r.message, /19\.50 eV/, '要写下限（3×6.5）');
+  assert.equal(r.min_window_ev, 19.5);
+  assert.deepEqual(r.window, [2, 20]);
+});
+
+check('E3 P1-7 file 背景 + 无 Background 列的 ASCII：出指令前就拒，文案点名缺哪一列', () => {
+  const two = spectrumRange(e16spec2);
+  const three = spectrumRange(e16spec3);
+  assert.equal(two.has_background, false, JSON.stringify(two));
+  assert.equal(two.columns, 2);
+  assert.equal(three.has_background, true, JSON.stringify(three));
+
+  const bad = useInstruction({ ...GOOD, background: 'file' }, 'exec', two);
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, 'background-file-needs-column');
+  assert.match(bad.message, /Background 列/, '文案要写明缺 Background 列');
+  assert.match(bad.message, /2 列/, '要写实际读到几列');
+
+  assert.equal(useInstruction({ ...GOOD, background: 'file' }, 'exec', three).ok, true, '3 列谱要放行');
+});
+
+check('E4 P1-8 裁剪谱落临时目录且用完即删（源码锚点）', () => {
+  assert.match(
+    MCP_SRC,
+    /dest = os\.path\.join\(tempfile\.gettempdir\(\), "xpspeak_fitwin_%d\.dat"/,
+    '裁剪谱必须落在 tempfile.gettempdir()',
+  );
+  assert.equal(MCP_SRC.includes('os.path.dirname(out_xps)'), false, '不许再把临时谱写到交付目录');
+  assert.match(MCP_SRC, /os\.remove\(plan\["crop"\]\["used"\]\)/, '裁剪谱用完要删');
+});
+
+check('E5 P2-9 notes 与「fit → build」一致，不许再出现别用 build 的说法', () => {
+  const notes = useInstruction({ ...GOOD, background: 'shirley' }, 'exec', null).instruction.notes.join('\n');
+  assert.match(notes, /流程是 fit → build/, 'notes 要写清 fit 只算、build 才写 GUI');
+  assert.match(notes, /别再用 xpspeak_export \/ xpspeak_save/);
+  assert.equal(/别用 xpspeak_build|也可改用 xpspeak_build/.test(notes), false, `notes 里还有矛盾说法：${notes}`);
+});
+
+const e16selSet = await request(e16port, '/xps/selection', {
+  method: 'POST',
+  body: JSON.stringify({ templateId: e16tpl.template.id }),
+});
+rmSync(join(e16root, 'templates', e16tpl.template.id), { recursive: true, force: true });
+const e16selStale = await request(e16port, '/xps/selection');
+await request(e16port, '/xps/selection', { method: 'POST', body: JSON.stringify({ templateId: null }) });
+
+check('E6 P2-10 选中的模板被删 → selection 标 stale 并给原因', () => {
+  assert.equal(e16selSet.status, 200, JSON.stringify(e16selSet.json));
+  assert.equal(e16selSet.json.selection.stale, false, '模板还在时不许说失效');
+  const st = e16selStale.json.selection;
+  assert.equal(st.stale, true, JSON.stringify(st));
+  assert.equal(st.templateId, e16tpl.template.id, '失效也要保留原 templateId，别静默清空');
+  assert.match(st.stale_reason, /已不存在/);
+  // 只出 JSON 不够：面板选择条要真读 stale / stale_reason（test 里已有 clientSrc 可查）。
+  assert.match(clientSrc, /stale_reason/, '列表页选择条要显示失效原因');
+  assert.match(clientSrc, /lastRun/, '列表页要能看见上次结果');
+});
+
+await new Promise((r) => e16srv.close(r));
 
 /* ───────── 结果 ───────── */
 

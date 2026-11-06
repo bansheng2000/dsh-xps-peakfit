@@ -270,6 +270,7 @@ whenToUse: 用户给出 XPS 数据（全谱和/或高分辨谱），要求做荷
 ### 保存前的校验链（七道门，阈值与依据）
 
 背景口径也是硬闸：`xpspeak_build` 先用 `bg_plan()` 核对「全谱 Shirley vs 拟合区 Shirley」，不一致默认裁谱；落盘后再用 `bg_consistency()` 回读导出谱的 Background 列，与模型窗口背景平均差超 0.5% 峰高（且 >20 cps）就删掉刚写出的 `.xps` 并报错 —— 拟合区背景 ≠ 全谱背景，建区前必须先统一。
+同一节的流程细节：`xpspeak_build` 自动裁到拟合窗口时，临时谱只落在系统临时目录、建区收尾即删，不留在交付目录；`useInstruction` 对「拟合区与谱范围交集」另设下限 `max(3×fwhm_max, 5 eV)`（更窄一律 422，别指望用它算出可用的 R²）；模板 `background=file` 而目标谱只有 2 列（无 `Background` 列）时，在出指令前就拒绝并点名缺哪一列。选择态 `selection.json` 的 `lastRun` 由 `use` / `audit` / `runlog` 真写（kind / status / at / templateId / reason / runPath / r2），选中的模板被删后读出来的 selection 带 `stale: true` 与 `stale_reason`，引用之前先看一眼。
 
 `xpspeak_fit` 的 `preflight` 与 `xpspeak_build` 的 `build_guard` 是**保存前**的硬闸：任何一条 errors 都意味着「不许落盘」，不是建议、更不能跳过。
 

@@ -1,5 +1,17 @@
 # 变更记录
 
+## 未发版修订（第十一批：lastRun、窗口下限、file 背景前置、临时谱清理、stale）
+
+版本仍 `2.8.0`。
+
+- **P1-5 `lastRun` 真有写入者**：`lib/routes.js` 新增 `recordLastRun()`，`use`（成功 `status:'ok'` / 失败 `status:'blocked'` + 原因）、`audit`（`status=verdict`、`r2`）、`runlog`（`status:'delivered'`、`runPath`、`r2`）各写一次。以前 `selection.json` 的 `lastRun` 只有读写定义、全仓没有一个写入者，选择态的「上次跑的结果」永远是 `null`。
+- **P1-6 窗口交集设下限**：`useInstruction` 在原「只判交集非空」之外，要求交集宽度 ≥ `max(3×fwhm_max, 5 eV)`，否则 422 `window-too-narrow`，文案写交集宽度与下限。反例：20 eV 拟合区 + 6.5 eV FWHM 的模板，交集 18 eV 也照跑，出来一个没人拦的难看 R²。
+- **P1-7 `file` 背景提前拦**：`spectrumRange()` 记 `columns` / `has_background`；`background='file'` + 2 列 ASCII 在 `useInstruction` 出指令前就返回 `background-file-needs-column`（写明读到几列、缺 Background 列），不再等 `server/xps_fit.py` 到拟合中段才报「没有背景列」。
+- **P1-8 裁剪谱用完即删**：`bg_plan()` 的临时谱本来就在 `tempfile.gettempdir()`（不落交付目录），`do_build` 建区收尾时再 `os.remove(plan["crop"]["used"])`，不留在临时目录里越攒越多。
+- **P2-9 notes 与流程一致**：`useInstruction` 的 notes 现在写明「流程是 fit → build」并禁止 export/save 写同一文件（旧句「也可改用 xpspeak_build…别自己编」在 P0 批已删，本轮加断言钉住）。
+- **P2-10 失效选择标 `stale`**：`readSelection()` 校验 `templateId` 对应的 `meta.json` 是否存在，不存在时给 `stale: true` + `stale_reason`；`POST /xps/selection` 回包也走 `readSelection()`（否则写盘对象里没有这两个字段，接口上看不见失效）。
+- 自检 120 → 126（E1–E6 六条）；六处变异各真红 1 条（删 runlog 写入 / 关最小宽度闸 / 前置检查恒 false / 不删临时谱 / `stale` 恒 false / notes 加回矛盾说法）。
+
 ## 未发版修订（第十批 C+D：建区回读行为断言、步骤补 build、荷电不默认归零、审计传窗口与核凭证）
 
 版本仍 `2.8.0`。

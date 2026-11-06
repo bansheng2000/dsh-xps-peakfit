@@ -681,6 +681,12 @@ def do_build(a):
         if plan.get("before"):
             b = plan["before"]
             txt += "\n（原谱全谱背景在窗口内平均低 %.0f cps，不裁谱就会让 Peak Sum 系统性偏低）" % b["mean_diff"]
+        # P1-8：裁剪谱只是这次建区的中间件，用完即删（路径本来就在 tempdir，不落交付目录）。
+        if plan.get("crop"):
+            try:
+                os.remove(plan["crop"]["used"])
+            except OSError:
+                pass
         if tmp_verify:
             try:
                 os.remove(tmp_verify)

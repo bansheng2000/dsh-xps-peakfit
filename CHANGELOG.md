@@ -1,5 +1,16 @@
 # 变更记录
 
+## 未发版修订（第十批 C+D：建区回读行为断言、步骤补 build、荷电不默认归零、审计传窗口与核凭证）
+
+版本仍 `2.8.0`。
+
+- **C 补真行为断言**：`test/selftest.mjs` 新增一条——伪造 `D.build` 写出 Background 整体 +5000 cps 的导出谱，让 `do_build` 真跑，断言它抛「建区背景与拟合背景不一致」且盘上不留 `.xps`。旧做法只查 `bg_consistency(` 的字符串位置，把那段分支改成 `if False:` 也不会红。
+- **P0-1 流程里补上 build**：`lib/routes.js` 的 `steps` 从 `status → open → fit → export → save` 改为 `status → open →（校正前置）→ fit → xpspeak_build`；fit 是纯 Python 拟合、不往 GUI 里加峰，`xpspeak_save` 存的是 GUI 当前状态，「fit → save」只会得到没有峰的 `.xps`。build 的 `peaks` 占位明写用本次 fit 的 `{pos, fwhm, area}`（`gl = eta×100`），不允许把模板里供对照的实测面积塞进去。
+- **P0-2 荷电校正不再被静默归零**：`charge_correction_ev` 由 `?? 0` 改回 `?? null`；非 0 时 `fields.charge_correction` 给 `{ev, reference_peak, applied:false}`，并在 `steps` 里插一条 `kind: 'precondition'`（fit 之前）——插件不平移能量，目标谱必须已按参考峰校正，未校正不许往下拟合。
+- **P0-3 审计按拟合区切片**：`POST /xps/audit` 之前不传 `window`，40 eV 谱会把 868–878 未建模的 2p1/2 也算进 R²/四段残差。现在：`body.window` 优先、否则模板 `fit_window_ev`，与谱范围取交集；都没有就是整条谱并在回包标 `window_mode: 'full'`；交集为空 422 `window-outside-spectrum`。
+- **P0-4 审计核交付凭证**：`auditArtifacts()` 新增 `runPath`，逐条重算 artifact 的 sha256，不一致或文件消失 → `artifacts-modified` fail（写明哪个文件、原/现哈希）；不传或 `run.json` 读不出 → `uncontrolled` warn。以前审计只看文件内部自洽，产物事后被改了也发现不了。
+- 自检 116 → 120（C + D1 步骤里必须有 build、D2 charge 不归零、D3 audit 按 window 切片、D4 run.json 哈希）；四处变异各真红 1 条（删 `window` 参数 / 把 build 换回 save / `?? 0` / 关掉哈希比对）。
+
 ## 未发版修订（第十批 A+B：背景类型只认 shirley/linear/file，build 按模板选背景）
 
 版本仍 `2.8.0`。

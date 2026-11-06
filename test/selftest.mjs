@@ -542,9 +542,15 @@ const b3tpl = {
   fit_window_ev: { lo: 864, hi: 880 },
 };
 
+// P0-4 后审计多了「交付凭证」一项：不关心哈希的用例给一份 artifacts 为空的 run.json，
+// 这样 artifacts-modified 落 skip、不会把 pass 降成 warn。
+const emptyRunPath = join(b3dir, 'run_empty.json');
+writeFileSync(emptyRunPath, JSON.stringify({ createdAt: '2026-01-01T00:00:00.000Z', artifacts: [] }), 'utf8');
+
 check('X1 审计好产物：R²/残差/峰顶缺口/窗口全过，verdict=pass', () => {
-  const a = auditArtifacts({ spectrumPath: b3spec, peaksPath: b3peaks, template: b3tpl });
-  assert.equal(a.checks.length, 7, JSON.stringify(a.checks));
+  const a = auditArtifacts({ spectrumPath: b3spec, peaksPath: b3peaks, template: b3tpl, runPath: emptyRunPath });
+  assert.equal(a.checks.length, 8, JSON.stringify(a.checks));
+  assert.equal(a.checks.find((c) => c.id === 'artifacts-modified').status, 'skip', 'run.json 没登记产物 → 没有可复核哈希，判 skip 而不是 pass');
   const byId = Object.fromEntries(a.checks.map((c) => [c.id, c]));
   assert.equal(byId['fit-quality'].status, 'pass', byId['fit-quality'].detail);
   assert.equal(byId['residual-structure'].status, 'pass', byId['residual-structure'].detail);
@@ -598,7 +604,7 @@ const b3created = createTemplate(b3tpl, root);
 const auditOk = await request(b3port, '/xps/audit', {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ spectrumPath: b3spec, peaksPath: b3peaks, templateId: b3created.template.id }),
+  body: JSON.stringify({ spectrumPath: b3spec, peaksPath: b3peaks, templateId: b3created.template.id, runPath: emptyRunPath }),
 });
 const audit404 = await request(b3port, '/xps/audit', {
   method: 'POST',
@@ -732,6 +738,8 @@ const tryCall = (fn) => {
 const twoColParse = tryCall(() => parseSpectrum(twoColPath));
 const twoColAudit = tryCall(() => auditArtifacts({ spectrumPath: twoColPath }));
 const threeColAudit = tryCall(() => auditArtifacts({ spectrumPath: threeColPath }));
+// 全 skip 判 insufficient 的前提是「没有任何实质检查」；给一份空凭证避免 uncontrolled 的 warn 把它变成 warn。
+const twoColNoCreds = tryCall(() => auditArtifacts({ spectrumPath: twoColPath, runPath: emptyRunPath }));
 const oneColParse = tryCall(() => parseSpectrum(oneColPath));
 const auditTwo = await request(b3port, '/xps/audit', {
   method: 'POST',
@@ -799,16 +807,19 @@ check('Z4 列数不足（1 列）：报列数并写明需要 2 列或 XPSPeak �
 });
 
 check('Z5 全 skip 判 insufficient（不叫通过），summary 给四项计数', () => {
-  assert.equal(twoColAudit.value.verdict, 'insufficient', JSON.stringify(twoColAudit.value.checks.map((c) => c.status)));
+  assert.equal(twoColNoCreds.ok, true, twoColNoCreds.err);
+  assert.equal(twoColNoCreds.value.verdict, 'insufficient', JSON.stringify(twoColNoCreds.value.checks.map((c) => c.status)));
   assert.deepEqual(
-    twoColAudit.value.summary.counts,
-    { pass: 0, warn: 0, fail: 0, skip: 5 },
-    JSON.stringify(twoColAudit.value.summary.counts),
+    twoColNoCreds.value.summary.counts,
+    { pass: 0, warn: 0, fail: 0, skip: 6 },
+    JSON.stringify(twoColNoCreds.value.summary.counts),
   );
+  // 不给 runPath 时必须是 warn（有一条指名「没有交付凭证」），不能静默当成审过
+  assert.equal(twoColAudit.value.verdict, 'warn', JSON.stringify(twoColAudit.value.checks.map((c) => c.status)));
 });
 
 check('Z6 有实质检查且无 fail/warn → 仍判 pass，并带 counts', () => {
-  const good = auditArtifacts({ spectrumPath: b3spec, peaksPath: b3peaks });
+  const good = auditArtifacts({ spectrumPath: b3spec, peaksPath: b3peaks, runPath: emptyRunPath });
   assert.equal(good.verdict, 'pass', JSON.stringify(good.checks));
   assert.equal(good.summary.counts.pass + good.summary.counts.warn + good.summary.counts.fail > 0, true, '必须真有检查跑过');
   assert.equal(good.summary.counts.skip + good.summary.counts.pass + good.summary.counts.warn + good.summary.counts.fail, good.checks.length);
@@ -1805,6 +1816,144 @@ print(json.dumps({'msg': msg, 'exists': os.path.exists(out_xps)}, ensure_ascii=F
   const r = JSON.parse(out);
   assert.match(r.msg, /建区背景与拟合背景不一致/, '必须点名背景口径不一致');
   assert.equal(r.exists, false, '被拦下时盘上不许留下 .xps');
+});
+
+/* ───────── 15. D 系列：steps 里的 build / charge / audit 的 window 与 run.json ───────── */
+
+process.stdout.write('\n[15] D 系列缺口：build 进步骤 / charge 不静默归零 / audit 传 window / audit 核 run.json\n');
+
+// b3srv 已在 [13] 收尾时关掉，这里单开一个，避免后面的 HTTP 断言打空端口
+// b3created 那份模板在前面 CRUD 用例里已被删，这里新建一份专供 D3
+const d15tpl = createTemplate({ ...b3tpl, name: 'D15 audit window' }, root);
+const d15srv = createServer(createRoutes({ root, env: { ...process.env, XPSPEAK_ROOT: root, XPSPEAK_MODE: '', XPSPEAK_MODE_FILE: '' } }));
+await new Promise((resolve) => d15srv.listen(0, '127.0.0.1', resolve));
+const d15port = d15srv.address().port;
+const auditWithWindow = await request(d15port, '/xps/audit', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ spectrumPath: b3spec, peaksPath: b3peaks, templateId: d15tpl.template.id, runPath: emptyRunPath }),
+});
+const auditWithBodyWin = await request(d15port, '/xps/audit', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ spectrumPath: b3spec, peaksPath: b3peaks, templateId: d15tpl.template.id, window: [866, 878], runPath: emptyRunPath }),
+});
+const auditOutOfSpectrum = await request(d15port, '/xps/audit', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ spectrumPath: b3spec, peaksPath: b3peaks, templateId: d15tpl.template.id, window: [700, 710] }),
+});
+
+await new Promise((resolve) => d15srv.close(resolve));
+rmSync(join(root, 'templates', d15tpl.template.id), { recursive: true, force: true });
+
+// P0-4 的夹具：一份登记了 sha256 的 run.json 与它登记的两个产物（复制自 b3 好产物，不污染后续用例）
+const crDir = join(b3dir, 'creds');
+mkdirSync(crDir, { recursive: true });
+const crSpec = join(crDir, 'spectrum.dat');
+const crPeaks = join(crDir, 'peaks.dat');
+writeFileSync(crSpec, readFileSync(b3spec));
+writeFileSync(crPeaks, readFileSync(b3peaks));
+const crRun = join(crDir, 'run.json');
+writeFileSync(crRun, JSON.stringify({
+  createdAt: '2026-01-01T00:00:00.000Z',
+  artifacts: [
+    { path: crSpec, sha256: sha256(readFileSync(crSpec)), bytes: readFileSync(crSpec).length },
+    { path: crPeaks, sha256: sha256(readFileSync(crPeaks)), bytes: readFileSync(crPeaks).length },
+  ],
+}), 'utf8');
+
+
+check('D1 fit 之后必须有 build，且不许再把同一份 .xps 交给 save；build 的面积占位不写模板对照值', () => {
+  const t = {
+    ...GOOD,
+    fit_window_ev: { lo: 227.5, hi: 231.5 },
+    charge_correction_ev: null,
+    peak_windows: [{ label: 'Mo 3d5/2', center_ev: 229.0, search_ev: 0.5, observed: { fwhm_ev: 1.2, gl_pct: 30, area: 77777 } }],
+  };
+  const ins = useInstruction(t, 'exec', null).instruction;
+  const tools = ins.steps.map((x) => x.tool);
+  assert.ok(tools.includes('xpspeak_build'), `steps 必须有 build：${JSON.stringify(tools)}`);
+  assert.ok(tools.indexOf('xpspeak_build') > tools.indexOf('xpspeak_fit'), 'build 必须在 fit 之后（fit 只算不写 GUI）');
+  assert.equal(tools.includes('xpspeak_save'), false, 'save 存的是 GUI 当前状态，与 build 抢同一个文件，必须删掉');
+  const b = ins.steps.find((x) => x.tool === 'xpspeak_build');
+  assert.deepEqual(b.arguments.window, [227.5, 231.5], 'build 也要按拟合区建');
+  assert.equal(b.arguments.expect_bg, 'shirley');
+  assert.equal(b.arguments.actual_bg, 'shirley');
+  const ph = String(b.arguments.peaks);
+  assert.equal(ph.includes('77777'), false, `build 的 peaks 占位不许出现模板对照面积：${ph}`);
+  assert.match(ph, /\{pos, fwhm, area\}/, '占位必须说清要填哪三个数');
+});
+
+check('D2 charge_correction_ev：null 不许变回 0；非 0 时必须出「先校正再拟合」前置步且 applied=false', () => {
+  const none = useInstruction({ ...GOOD, charge_correction_ev: null }, 'exec', null).instruction;
+  assert.equal(none.fields.charge_correction_ev, null, 'null 是「未登记」，不许 ?? 0');
+  assert.equal(none.fields.charge_correction, null);
+  assert.equal(none.steps.some((x) => x.kind === 'precondition'), false, '未登记就不该有校正步');
+
+  const zero = useInstruction({ ...GOOD, charge_correction_ev: 0 }, 'exec', null).instruction;
+  assert.equal(zero.fields.charge_correction_ev, 0);
+  assert.equal(zero.steps.some((x) => x.kind === 'precondition'), false, '0 表示无需校正');
+
+  const need = useInstruction({ ...GOOD, charge_correction_ev: 0.8, reference_peak: 'C 1s' }, 'exec', null).instruction;
+  assert.equal(need.fields.charge_correction.ev, 0.8);
+  assert.equal(need.fields.charge_correction.applied, false, '插件不平移能量，必须标未施加');
+  assert.equal(need.fields.charge_correction.reference_peak, 'C 1s');
+  const pre = need.steps.find((x) => x.kind === 'precondition');
+  assert.ok(pre, '非 0 校正必须进 steps');
+  assert.ok(need.steps.findIndex((x) => x.kind === 'precondition') < need.steps.findIndex((x) => x.tool === 'xpspeak_fit'), '校正步必须在 fit 之前');
+  assert.match(pre.why, /先校正再拟合/);
+  assert.match(pre.why, /\+0\.80 eV/);
+  assert.match(pre.why, /C 1s/);
+});
+
+check('D3 /xps/audit 按模板 fit_window_ev 切片（body.window 优先），回包带 window 与 window_mode', () => {
+  const ssp = parseSpectrum(b3spec);
+  const sLo = Math.min(...ssp.be);
+  const sHi = Math.max(...ssp.be);
+  const byTpl = auditWithWindow;   // 不传 window → 用模板 fit_window_ev 864–880
+  assert.equal(byTpl.status, 200, JSON.stringify(byTpl.json));
+  assert.equal(byTpl.json.window_mode, 'template');
+  assert.deepEqual(byTpl.json.window, [Math.max(864, sLo), Math.min(880, sHi)]);
+  assert.equal(byTpl.json.summary.fit_window_ev !== undefined, true, 'summary 要记录实际切到的边界');
+
+  assert.equal(auditWithBodyWin.status, 200, JSON.stringify(auditWithBodyWin.json));
+  assert.equal(auditWithBodyWin.json.window_mode, 'body', 'body.window 优先于模板');
+  assert.deepEqual(auditWithBodyWin.json.window, [866, 878]);
+  // 只断言回包里的 window 会漏掉「路由算了窗口却没传给审计」这种错：summary 记的是审计真正切到的边界。
+  assert.deepEqual(auditWithBodyWin.json.summary.fit_window_ev, [866, 878], '审计必须真的按 body.window 切片，不是只把数字回显');
+  assert.match(
+    auditWithBodyWin.json.checks.find((c) => c.id === 'window-applicability').detail,
+    /本次窗口 12\.00 eV/,
+    '窗宽要按 866–878 = 12 eV 算，说明切片真的生效',
+  );
+
+  assert.equal(auditOutOfSpectrum.status, 422, JSON.stringify(auditOutOfSpectrum.json));
+  assert.equal(auditOutOfSpectrum.json.code, 'window-outside-spectrum');
+});
+
+check('D4 审计核 run.json：产物改一个字节 → artifacts-modified fail；删 run.json → uncontrolled warn', () => {
+  const pass = auditArtifacts({ spectrumPath: crSpec, peaksPath: crPeaks, template: b3tpl, runPath: crRun });
+  const pm = pass.checks.find((c) => c.id === 'artifacts-modified');
+  assert.equal(pm.status, 'pass', pm.detail);
+
+  writeFileSync(crSpec, readFileSync(crSpec, 'utf8') + ' ');
+  const bad = auditArtifacts({ spectrumPath: crSpec, peaksPath: crPeaks, template: b3tpl, runPath: crRun });
+  const bm = bad.checks.find((c) => c.id === 'artifacts-modified');
+  assert.equal(bm.status, 'fail', bm.detail);
+  assert.match(bm.detail, /改过/);
+  assert.match(bm.detail, /spectrum\.dat/);
+  assert.equal(bad.verdict, 'fail', '产物被改动必须让整体 verdict 落 fail');
+
+  rmSync(crPeaks);
+  const gone = auditArtifacts({ spectrumPath: crSpec, peaksPath: b3peaks, template: b3tpl, runPath: crRun });
+  assert.match(gone.checks.find((c) => c.id === 'artifacts-modified').detail, /已不存在/);
+
+  const noCreds = auditArtifacts({ spectrumPath: b3spec, peaksPath: b3peaks });
+  const uc = noCreds.checks.find((c) => c.id === 'uncontrolled');
+  assert.equal(uc.status, 'warn', uc.detail);
+  assert.match(uc.detail, /没有交付凭证/);
+  assert.equal(noCreds.verdict, 'warn');
 });
 
 /* ───────── 结果 ───────── */

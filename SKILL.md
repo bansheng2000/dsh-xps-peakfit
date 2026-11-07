@@ -233,7 +233,7 @@ whenToUse: 用户给出 XPS 数据（全谱和/或高分辨谱），要求做荷
    | `applicable_window_ev`（>0） | **不是工具参数**：模板标定时的窗口宽度；目标谱窗口（高−低）**不足其 90%** → `use` 返回 422 `window-too-narrow`（message 同时写模板宽度与本次宽度）；90%–100% 放行但 `warnings` 写明窄了多少 eV，边界截断按常规检查 |
    | `peak_windows[].search_ev` | `xpspeak_fit.ctol`（峰位初值允许移动的半宽）**只能给一个标量**：取各峰 `search_ev` 的最大值；一个都没有 → 回落 1.0 eV |
    | `charge_correction_ev`、`reference_peak` | **不传参**，只写进报告（「已按 C 1s 284.6 eV 校正」这类信息） |
-   | `provenance`、`peak_windows[].observed` | **不传参**，只用于显示与换样品对照（`observed` 是这一次的实测值：峰位/宽/%GL/面积/占比）。要让它影响拟合，必须显式写该峰的 `peak_windows[].eta` |
+   | `provenance`、`peak_windows[].observed` | **不传参**，只用于显示与换样品对照（`observed` 是这一次的实测值：峰位/宽/%GL/面积/占比）。要让它影响拟合，必须显式写该峰的 `peak_windows[].eta`。`provenance` 的键是**严白名单**：`source_file` / `points` / `step_ev` / `range_ev` / `sha256` / `source_fit` / `fwhm_band_source`，写错键名直接 400 并列出允许键（静默丢弃会让人以为记下了）；`sha256` 是 64 位十六进制，`source_fit` 是源谱优度（`r2_bg`/`rms`/`n_peaks`/`window_ev`/`bounds`），`fwhm_band_source` 说明 FWHM 区间怎么来的 |
 
    **`warnings` 是提醒不是错误**：模板没写 `eta` 时 `use` 仍返回 200，但 `instruction.warnings` 非空（「已按 0.3 拟合，实测 %GL 不同的谱请补 eta」）——见到就补 `eta` 再拟合，别装作没看见。模板写了 `applicable_window_ev` 但请求里没带谱图路径、或谱图读不出范围时，也只给 warnings（「未核对」）；老模板没写这个字段、而这次带了谱图时，同样只给 warnings（「未标 applicable_window_ev」）。一旦拿到窗口且不足，就是 422 拒绝，不是警告。
 
@@ -249,7 +249,7 @@ whenToUse: 用户给出 XPS 数据（全谱和/或高分辨谱），要求做荷
 1. **峰参数只取软件导出值**：峰位、FWHM、%GL 逐峰来自导出文本（不是从图上目测），`eta` = `%GL/100` 逐峰独立；`fit_window_ev` 按「首峰 − 3×最大 FWHM、末峰 + 3×最大 FWHM」推，超出谱范围就取交集并在回包里出 warning；`applicable_window_ev` 取谱宽。
 2. **背景判定用 Python 那套算法，不另写一份**：把谱自带的 Background 列分别与「两端点直线」和「重算 Shirley」逐点比，按扣背景峰高归一，谁的最大偏离 < 0.5% 判谁；两个都不过判 `file`（建区沿用谱自带背景）并把两个百分数写进 warning。这是来源约束，不是「这个背景适合这条谱」的证明。
 3. **元数据不许多键为空**：`element`/`orbital`/`category` 是检索键，从文件名认（`Ni2p`、`Ni 2p`、`ni_2p` 这类都认），认出来就预填 `category=高分辨谱`；认不出留空并在面板标红，**保存按钮会拒绝**——缺键的模板等于脏数据。
-4. **不留原始文件**：导入成功后源 `.xps` 从 `imports/` 删掉（原文件在用户磁盘上），`sha256` 与原始文件名写进 `draft.provenance` 供复盘；`imports/<时间戳>.json` 只留最近 20 份草稿。
+4. **不留原始文件**：导入成功后源 `.xps` 从 `imports/` 删掉（原文件在用户磁盘上），`sha256` 与原始文件名写进 `draft.provenance` 供复盘；`imports/<时间戳>.json` 只留最近 20 份草稿。同一份草稿还记两个复盘字段：`provenance.source_fit`（`r2_bg` / `rms` / `n_peaks` / `window_ev` / `bounds`，用 `xps_fit.assess_peaks` 按导出的峰参数与谱复算，不是从软件读的；`bounds` 写 `null`——导出文本里没有撞界信息，写 0 会被读成「没有撞界」）与 `provenance.fwhm_band_source: "source-spectrum ±25%"`。模板详情表直接显示这两行，没有它们的老模板显示「未记录（第十六批之前建的模板）」，**不显示 0、不猜**；想回答「这份模板自己拟合得好不好」，只有它记了才答得出。
 5. **拒绝路径**：教学档 403 `teaching-mode`；`.rpa` 415 `rpa-not-supported`（只有区域峰参数、没有谱）；非 `.xps` 或文件头不是 `XPSPEAK 4.0` → 415 `not-xps`；超过 20 MB → 413；同一时刻只允许一份导入（`imports/.lock`，占用时 409 `import-busy`，陈锁 >5 分钟视为上次被杀）；导出里没有峰 → 422 `no-peaks`；起不来 XPSPeak → 501 `xpspeak-not-found`；超时（默认 90 s，`XPS_IMPORT_TIMEOUT_MS` 可调）→ 504。
 6. **导入 ≠ 复核**：草稿里的 `observed`（面积/占比/FWHM/%GL）是那次记录的实测值，只作对照；用这份模板拟合新谱时，门槛、残差与结论字段照旧。
 7. **静默运行（默认）**：导入期间 XPSPeak 不该在你眼前乱弹窗。脚本默认 `--hidden`：启动时 `STARTUPINFO` 直接 `SW_HIDE`，再加一个 80 ms 轮询的隐藏线程，把**本进程**的可见顶层窗体全部 `ShowWindow(h, 0)`（只碰这次拉起的那个 pid，你自己开着的另一个 XPSPeak 实例不受影响）。实测这条路上「打开 → 导出峰参数 → 导出谱」与可见模式**逐字节相同**（30241 B、md5 `75f1fae4…`），`build` 那条（打开 → 扣背景 → Add Peak → 存 `.xps`）也能跑完（28.2 s、峰参数与传入完全一致）。两点如实说明：① 窗口仍会**闪现**——10 ms 采样器实测单窗最长可见 0.29–0.36 s（轮询间隔 80 ms 决定上限，采样线程被抢占时读数偏大），不是 0；② 别指望靠独立桌面/窗口站彻底消掉它，那条路没验证过、还可能让 VB6 控件找不到窗口。排障时加 `--no-hidden` 让窗口正常显示。
@@ -290,7 +290,7 @@ whenToUse: 用户给出 XPS 数据（全谱和/或高分辨谱），要求做荷
 
 `linear` 背景**没有**可用的物理适用性判据（已实测，不要重复找）：四条真实谱（模板源谱 vs 三条台阶谱，同一窗口 845.68–866.90）里最好的区分量是残差倾斜/噪声 0.31 vs 2.44–2.66（7.9×），`RMS(Shirley−弦)/峰高` 与台阶高度只有约 2.9×，都远达不到可设阈值的程度；而且模板源谱自己在 linear↔shirley 下总面积也变 −7.35% —— 它只是「当年选了 linear 并接受」，不是物理上的平背景。所以 `linear` 只在目标谱自带 Background 列、且该列与端点弦的 max|Δ| ≤ 扣背景峰高 0.5%（= 文件里的背景确实是直线）时使用，否则默认建议 `shirley`；真正的拦截交给上面的优度复算（台阶谱的残差段本来就撞 >0.5×rms，实测 −601/−537/−1451 cps）。`xpspeak_build` 的优度预检里另就 `linear` 发两条**警告（不当闸）**：源谱没有 Background 列 → 明说直线是按窗口两端现算、没有独立参照、优度只证明模型自洽；有 Background 列 → 量该列与端点弦的最大偏离，以「cps = 占扣背景峰高 %」写进 warning，超 0.5% 提示换 `shirley` 或 `file`。注意 4 列谱这一档同一偏离在 audit/preflight 的 `bg-shape` 硬闸里本来就会阻断，那条不放宽（runB2 正是靠它 + 残差被拦）。
 
-1. **撞界**：参数顶在 `ctol` / `wlo` / `whi` / `hmax` 上 → 阻断。顶界的值是约束决定的、不是数据拟合出来的。
+1. **撞界**：参数顶在 `ctol` / `wlo` / `whi` / `hmax` 上 → 阻断。顶界的值是约束决定的、不是数据拟合出来的。报错文案会明说「这些是**调用方给的约束**，不是本谱实测」；若这套界来自模板，模板的 `fwhm_min`/`fwhm_max` 是按标定源谱的实测 FWHM ±25% 推的（`provenance.fwhm_band_source` 写明），换一个样品不一定适用——不要拿它当「这条谱就该这么宽」的证据。
 2. **背景不一致**：模板 `background` 与实际 `bg` 不同 → 阻断（含 `file` 与非 file 互不放过）；`file` = 用谱自带背景，其余类型报的是模型不一致，不是「差不多」。（老模板的 `tougaard` 已归一成 `file`，不再有特例。）
 3. **未优化参数**：某参数 |终值−初值| < 1e-6 且不在界上 → 阻断。参数没动就是写死，RMS 再小也不能出结论。
 4. **优度**：`r2` 一律按扣背景口径（`(Raw−Background)` 对 `(Peak Sum−Background)`，XPSPeak 保存的就是这个刻度），< 0.90 警告、< 0.85 阻断。`r2_raw` 只作信息同时回报 —— 背景能占计数一大半，raw 口径天然接近 1（同一份 v2 产物 raw 0.9152 会放过、扣背景 0.8683 才是真实水平）。依据：实测那份「模板峰形只调高度」的拟合扣背景 R²=0.874（落在警告区）；0.85 以下残差与信号同量级。

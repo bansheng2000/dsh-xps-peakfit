@@ -1,5 +1,15 @@
 # 变更记录
 
+## 第十七批 C：模板记源谱优度与 FWHM 来源（F2 / F5）
+
+版本仍 `2.8.0`。
+
+- **问题（F2）**：模板 `provenance` 只有 `source_file`/`points`/`step_ev`/`range_ev`/`sha256`，事后无法回答「这份模板自己拟合得好不好」；而且路由的 `provenance` 是白名单，**未知键静默丢弃**——连草稿里的 `sha256` 都被丢掉了，面板显示有哈希、存下来却没有。
+- **改法（F2）**：导入侧在 `build_draft()` 里用 `xps_fit.assess_peaks()` 按导出峰参数与谱复算源谱优度，写 `provenance.source_fit = {r2_bg, rms, n_peaks, window_ev, bounds}`；`bounds` 写 `null`（导出文本没有撞界信息，写 0 等于编）。复算失败就一条 warning 并**不写**这个字段，不假装有值。模板详情表新增「源谱优度」一行，老模板显示「未记录（第十六批之前建的模板）」，不显示 0。
+- **改法（F5）**：导入侧写 `provenance.fwhm_band_source = "source-spectrum ±25%"`（`fwhm_min/max` 就是源谱实测 ±25% 推的，跨样品不可迁移）；撞界提示补一句「这些是调用方给的约束，不是本谱实测」——MCP 层拿不到模板来源，所以只写「若来自模板，它是源谱实测 ±25% 推的」，不编。
+- **provenance 白名单改严**：`validateTemplate` 只收 `source_file`/`points`/`step_ev`/`range_ev`/`sha256`/`source_fit`/`fwhm_band_source`，出现未知键 400 并列出允许键（不再静默丢弃）；`sha256` 必须 64 位十六进制并真正保存，`fwhm_band_source` ≤120 字符，`source_fit` 逐项校验（`r2_bg∈[0,1]`、`rms≥0`、`n_peaks` 整数 ≥1、`window_ev` 为 `[lo,hi]` 或 null、`bounds` 为整数 ≥0 或 null）。
+- **自检**：新增 [22] 段 K6（草稿 `source_fit` 与独立 `assess_peaks` 复算一致到 1e-6、`bounds` 为 null、窗口与谱范围取交 `[862.8, 880]`、`fwhm_band_source` 正确，`createTemplate` 存盘后三项仍在）、K7（未知键被拒且列出全部允许键、`sha256` 大写存成小写、老模板 `source_fit` 为 null 而非 0）。先红：旧代码 `FAIL K6 … KeyError: 'source_fit'`、`FAIL K7 …: 未知键必须拒绝，不许静默丢弃`（passed 150）。两处变异各真红：不写 `source_fit` → K6；白名单放行未知键 → K7。
+
 ## 第十七批 B：审计自动发现 run.json（F3）+ 边界截断汇总（F6）
 
 版本仍 `2.8.0`。

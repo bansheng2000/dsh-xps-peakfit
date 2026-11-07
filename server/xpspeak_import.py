@@ -218,6 +218,21 @@ def build_draft(peaks, spec, src_name, sha256=None):
             "拟合区按「首峰−3×FWHM、末峰+3×FWHM」推出来是 %.3f–%.3f eV，超出谱范围 %.3f–%.3f，已取交集。"
             % (min(centers) - 3.0 * max_fwhm, max(centers) + 3.0 * max_fwhm, spec_lo, spec_hi)
         )
+    # F2：把源谱这次拟合的优度记进 provenance —— 模板事后要能回答「它自己拟合得好不好」，
+    # 否则只能靠用户重跑一遍源谱。背景用谱自带的 Background 列（与模板 background 同一份口径），
+    # 参数按导出值复算、不再优化。撞界信息导出文本里没有，写 None（不编 0）。
+    source_fit = None
+    try:
+        q = F.assess_peaks(spec["be"], spec["raw"], spec["bg"], peaks, lo, hi, bg_kind=bg["kind"])
+        source_fit = {
+            "r2_bg": round(float(q["r2"]), 6),
+            "rms": round(float(q["rms"]), 3),
+            "n_peaks": len(peaks),
+            "window_ev": [round(lo, 4), round(hi, 4)],
+            "bounds": None,
+        }
+    except Exception as exc:  # 算不出来就明写没算，不编一个好看的数
+        warnings.append("源谱优度没能复算（%s）：provenance 里不写 source_fit。" % exc)
     stem = os.path.splitext(os.path.basename(src_name))[0]
     peak_windows = []
     for p in peaks:
@@ -253,6 +268,10 @@ def build_draft(peaks, spec, src_name, sha256=None):
             "step_ev": spec["step_ev"],
             "range_ev": round(spec["range_ev"], 4),
             "sha256": sha256,
+            "source_fit": source_fit,
+            # F5：fwhm_min/max 是下面按 min/max(FWHM)×0.75/1.25 推的，不是这条谱实测；
+            # 写清楚来源，换样品时才知道这组界是「模板带来的约束」。
+            "fwhm_band_source": "source-spectrum ±25%",
         },
     }
     # 让面板直接能填：认出来的元素/轨道/分类预填，认不出就留空由表单必填

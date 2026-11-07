@@ -2889,6 +2889,83 @@ print(json.dumps({'warnings': pf['warnings'], 'details': pf.get('details', {})},
   assert.doesNotMatch(JSON.stringify(r.warnings), /组分\d+（[\d.]+ eV）峰心距谱端不到/, '逐峰各报一条的旧写法必须删干净');
 });
 
+/* ───────── 22. 模板 provenance：源谱优度（F2）与 FWHM 带来源（F5） ───────── */
+
+process.stdout.write('\n[22] 模板 provenance：源谱优度（F2）与 FWHM 带来源（F5）\n');
+
+const provPeaks = join(impFx, 'shirley', 'peaks.dat');
+const provSpec = join(impFx, 'shirley', 'spectrum.dat');
+
+check('K6 导入草稿记源谱优度（与 assess_peaks 复算一致、bounds 不编 0），存成模板后还在', () => {
+  const out = runPy(`
+import json, sys
+sys.path.insert(0, 'server')
+import xpspeak_import as I
+import xps_fit as F
+
+draft, _warns = I.draft_from_paths(${JSON.stringify(provPeaks)}, ${JSON.stringify(provSpec)}, 'Ni2p_demo.xps', '${'a'.repeat(64)}')
+peaks = [{'pos': w['center_ev'], 'fwhm': w['observed']['fwhm_ev'], 'area': w['observed']['area'], 'gl': w['observed']['gl_pct']}
+         for w in draft['peak_windows']]
+spec = I.parse_spectrum(open(${JSON.stringify(provSpec)}, 'r', encoding='utf-8', errors='replace').read())
+bg = I.classify_background(spec)
+lo, hi = draft['provenance']['source_fit']['window_ev']
+q = F.assess_peaks(spec['be'], spec['raw'], spec['bg'], peaks, lo, hi, bg_kind=bg['kind'])
+print(json.dumps({'draft': draft, 'recomputed': {'r2_bg': q['r2'], 'rms': q['rms']},
+                  'bg_kind': bg['kind']}, ensure_ascii=False))
+`);
+  const r = JSON.parse(out);
+  const draft = r.draft;
+  const prov = draft.provenance;
+  const sf = prov.source_fit;
+  assert.ok(sf && typeof sf === 'object', 'provenance.source_fit 必须写进去（模板要能回答「它自己拟合得好不好」）');
+  assert.ok(Math.abs(sf.r2_bg - r.recomputed.r2_bg) < 1e-6, `r2_bg 必须与 assess_peaks 复算一致：${sf.r2_bg} vs ${r.recomputed.r2_bg}`);
+  assert.ok(Math.abs(sf.rms - r.recomputed.rms) <= 1e-3, `rms 必须与复算一致：${sf.rms} vs ${r.recomputed.rms}`);
+  assert.equal(sf.n_peaks, 3);
+  assert.equal(sf.bounds, null, '导出文本里没有撞界信息，必须写 null —— 写 0 会被读成「没有撞界」');
+  assert.deepEqual(sf.window_ev, [862.8, 880], `窗口要落 4 位且与谱范围取交，实际 ${JSON.stringify(sf.window_ev)}`);
+  assert.equal(prov.fwhm_band_source, 'source-spectrum ±25%', 'FWHM 区间是源谱实测 ±25% 推的，必须标明');
+  assert.equal(prov.sha256, 'a'.repeat(64));
+  assert.equal(r.bg_kind, 'shirley');
+
+  const created = createTemplate(draft, root);
+  assert.equal(created.ok, true, JSON.stringify(created.errors));
+  const meta = JSON.parse(readFileSync(join(root, 'templates', created.template.id, 'meta.json'), 'utf8'));
+  assert.equal(meta.provenance.source_fit.r2_bg, sf.r2_bg, '存盘后 source_fit 不许丢');
+  assert.equal(meta.provenance.source_fit.bounds, null);
+  assert.equal(meta.provenance.fwhm_band_source, 'source-spectrum ±25%');
+  assert.equal(meta.provenance.sha256, 'a'.repeat(64));
+});
+
+check('K7 provenance 白名单改严：未知键被拒并列全允许键，sha256 不再静默丢弃，老模板仍通过', () => {
+  const bad = validateTemplate({ ...GOOD, provenance: { source_file: 'a.dat', artifacts: ['x'], foo: 1 } });
+  assert.equal(bad.ok, false, '未知键必须拒绝，不许静默丢弃');
+  const joined = bad.errors.join('\n');
+  assert.match(joined, /provenance\.artifacts 不是已知字段/, joined);
+  assert.match(joined, /provenance\.foo 不是已知字段/, joined);
+  assert.match(joined, /source_file \/ points \/ step_ev \/ range_ev \/ sha256 \/ source_fit \/ fwhm_band_source/, '必须把允许键列全');
+
+  const good = validateTemplate({
+    ...GOOD,
+    provenance: {
+      source_file: 'a.dat', points: 401, step_ev: 0.1, range_ev: 40,
+      sha256: 'B'.repeat(64),
+      fwhm_band_source: 'source-spectrum ±25%',
+      source_fit: { r2_bg: 0.9975, rms: 304.25, n_peaks: 5, window_ev: [849.4, 865.9], bounds: null },
+    },
+  });
+  assert.equal(good.ok, true, JSON.stringify(good.errors));
+  assert.equal(good.template.provenance.sha256, 'b'.repeat(64), 'sha256 必须真存下来（第十五批被白名单静默丢掉过）');
+  assert.equal(good.template.provenance.fwhm_band_source, 'source-spectrum ±25%');
+  assert.equal(good.template.provenance.source_fit.r2_bg, 0.9975);
+  assert.equal(good.template.provenance.source_fit.rms, 304.25);
+  assert.equal(good.template.provenance.source_fit.bounds, null, 'bounds 不许被默认成 0');
+
+  const old = validateTemplate({ ...GOOD, provenance: { source_file: 'old.dat' } });
+  assert.equal(old.ok, true, JSON.stringify(old.errors));
+  assert.equal(old.template.provenance.source_fit, null, '老模板没有优度就是 null，不是 0');
+  assert.equal(old.template.provenance.sha256, '', '老模板没有哈希就是空串');
+});
+
 /* ───────── 结果 ───────── */
 
 if (failures.length > 0) {

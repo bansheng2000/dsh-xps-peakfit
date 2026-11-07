@@ -601,6 +601,10 @@ def bound_text(res):
     if any(x["param"] == "fwhm" and x["side"] == "lo" for x in b):
         L.append("⚠ FWHM 顶到 wlo=%.2f：谱里可能有更窄的峰，请降低 wlo（否则 FWHM 只是被压平的假值）"
                  % (lim.get("wlo") or 0))
+    # F5：撞界时读者最容易误以为「这些界是这条谱量出来的」。界是调用方（模板/人）给的，不是本谱实测。
+    L.append("⚠ 上面的 ctol / wlo / whi / hmax 是**调用方给的约束**，不是本谱实测出来的；"
+             "若这套界来自模板，模板的 fwhm_min/fwhm_max 是按标定源谱的实测 FWHM ±25% 推的"
+             "（模板 provenance.fwhm_band_source 会写明），换一个样品不一定适用。")
     return "\n".join(L)
 
 

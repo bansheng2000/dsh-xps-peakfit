@@ -1,5 +1,15 @@
 # 变更记录
 
+## 第十七批 A：`ds` 默认改 0（不猜）+ 峰高/面积口径写明（F1 / F4）
+
+版本仍 `2.8.0`。
+
+- **问题（F1）**：`xpspeak_fit` 的 `ds` 默认是 1.18（S 2p 的劈裂），不传就静默套到任何元素上。Ni 2p 五峰实测：默认 1.18 → 第 2 个组分峰高被压到 **0**、撞界 1 项、R² 0.997957→0.985095、rms 276.76→747.54、峰顶缺口 3.4%→12.4%。只有一条「撞界」提示，结果看着还挺好。
+- **改法**：`server/xps_fit.py` 的 `fit(..., ds=0.0)`、`run(..., ds=0.0)` 与 CLI 入口、`server/xpspeak_mcp.py` 的 `do_fit`（`a.get("ds", 0.0)`）、schema 文案全部改成「不传 = 0（单线、没有伴线、不猜）；要双线必须显式给 Δ」。模板路径本来就是 `template.doublet_delta_ev ?? 0`，不动。`_constraint_warnings` 加 `0.0 < ds` 条件——单线不该出现任何伴线口径提示。
+- **问题（F4）**：返回的 `height` 只是**主线**幅度，`area` 却是**双线合计**，ratio=0.5 时 `area/(w·af(η))` 恰好 = 1.5×`height`（实测四个组分 23871.8/15917、11381.0/7589、2895.5/1931、3984.6/2657 全是 1.500）。按 `height` 画图会以为「拟合矮了 43%」。
+- **改法**：comps 新增 `height_pair`（该峰位处含伴线尾巴的合计高度）与 `area_main`（主线面积）；`report()` 组分行改印「area …（双线合计） h主=… / h合=…」，`ds=0` 时不再印「伴线」，模型行改印「ds=0（单线：没有伴线，N 个独立峰）」。
+- **自检**：新增 [20] 段 K1（不传 `ds` 是单线、五峰高度都 >0、无撞界、R² 0.997957；显式 1.18 时某峰高度 ==0 且 bounds 含 `height`）、K2（两层源码默认都是 0、schema 与 CLI 不许留 1.18）、K3（`height_pair > height`、`area_main < area`、`area − area_main == ratio×area_main`、报告文案）。夹具 `test/fixtures/ds/ni2p_5peak_spectrum.dat`（30723 B，来自 `ceshiqu\out\20261107-ni2p-2xls-clean`）。三处变异各真红：`run` 默认改回 1.18 → K1/K2/K3；`height_pair = h` → K3；报告恒按双线印 → K1。
+
 ## 补：面板 %GL 改为逐峰显示（`lib/client.js`）
 
 版本仍 `2.8.0`。

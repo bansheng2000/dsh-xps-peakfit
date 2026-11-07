@@ -206,7 +206,8 @@ def _constraint_warnings(centers, ds, ratio):
     cs = sorted(centers)
     gaps = [b - a for a, b in zip(cs, cs[1:])]
     gap = min(gaps) if gaps else None
-    if ds < 2.0 and gap is not None and gap >= 2.0:
+    # ds=0 是「单线、不猜」：没有伴线，就不该出现任何伴线口径的提示（否则每次单线拟合都在喊改 ds）。
+    if 0.0 < ds < 2.0 and gap is not None and gap >= 2.0:
         L.append("⚠ 初值最小间距 %.2f eV，但 ds=%.2f 是 2p 口径（1.16-1.20）：若这是 3d 双线（3.1-3.2）"
                  "或 4f（~5.2），请改 ds —— 否则伴线位置本身就放错了" % (gap, ds))
     if ds >= 2.5 and abs(ratio - 0.5) < 1e-9:
@@ -215,12 +216,16 @@ def _constraint_warnings(centers, ds, ratio):
     return L
 
 
-def fit(E, raw, bg, centers, ds=1.18, ratio=0.5, eta=0.3,
+def fit(E, raw, bg, centers, ds=0.0, ratio=0.5, eta=0.3,
         ctol=1.0, wlo=0.6, whi=4.0, hmax=120000.0, iters=400, lo=None, hi=None):
     """带约束的 LM 拟合。返回 dict（含每组分参数±σ、rms、R²、AIC、残差、撞界清单）。
 
     撞界见模块顶部说明：res["bound"] 列出顶到边界的参数，report()/MCP 文本都会显式写出。
     lo/hi（eV）限定拟合窗口；窗口内重取两端作为基线端点，窗口外完全不参与。
+
+    ds 默认 0.0（单线、不猜）：1.18 是 S 2p 的劈裂，套到 Ni/Co/Fe 2p 上会把一个组分的峰高
+    压到 0 且只留一条「撞界」提示（实测 Ni 2p：R² 0.997957→0.985095、rms 276.76→747.54）。
+    双线必须由调用方显式给 Δ；模板路径的 Δ 来自 template.doublet_delta_ev（为 null 时同样是 0）。
     """
     win = (lo, hi)          # lo/hi 下面会被参数上下界复用，先把窗口参数存下来
     idx = _widx(E, lo, hi)
@@ -336,8 +341,13 @@ def fit(E, raw, bg, centers, ds=1.18, ratio=0.5, eta=0.3,
     comps = []
     for i in range(nc):
         c, w, h = p[3 * i], p[3 * i + 1], p[3 * i + 2]
-        af = area_factor(et[i]) * (1.0 + ratio)
+        af1 = area_factor(et[i])                  # 单线：高度 -> 面积
+        af = af1 * (1.0 + ratio)                  # 双线合计（含伴线）
         area = h * w * af
+        area_main = h * w * af1
+        # 该峰位处的**合计高度**：主线 + 伴线在 c 处的尾巴。
+        # ds=0（单线）时两条线重合，按定义退化成 h*(1+ratio)；ratio=0 时就是 h 本身。
+        height_pair = h + gl(c, c + ds, w, h * ratio, et[i])
         # σ_area 传播：area = h·w·af（af 只依赖 eta，与峰位无关）。只保留真正进公式的两项：
         #   · 补上 height 项 —— 原来漏了，σ 系统性偏小（本次修正的主项）；
         #   · 去掉 center 项 —— 峰位不参与面积公式，原来那一项是错项。
@@ -347,7 +357,8 @@ def fit(E, raw, bg, centers, ds=1.18, ratio=0.5, eta=0.3,
                                   + (sig[3 * i + 2] / h if h else 0.0) ** 2)
         comps.append(dict(center=round(c, 4), center_err=round(sig[3 * i], 4),
                           partner=round(c + ds, 4), fwhm=round(w, 4), fwhm_err=round(sig[3 * i + 1], 4),
-                          height=round(h, 1), area=round(area, 1), area_err=round(s_area, 1),
+                          height=round(h, 1), height_pair=round(height_pair, 1),
+                          area=round(area, 1), area_main=round(area_main, 1), area_err=round(s_area, 1),
                           eta=et[i], bounds=atb.get(i, [])))
     tot = sum(c["area"] for c in comps) or 1.0
     for c in comps:
@@ -587,8 +598,13 @@ def report(res, head="", include_bounds=True, include_warnings=True):
     L = [head] if head else []
     et = res.get("eta_list") or [res.get("eta", 0.3)]
     eta_txt = "%.2f" % et[0] if len(set(et)) == 1 else "/".join("%.2f" % v for v in et)
-    L.append("模型: %d 条双峰（Δ=%.3f eV, 面积比 1:%.2f, 等宽, eta=%s）  n=%d  k=%d"
-             % (res["nc"], res["ds"], res["ratio"], eta_txt, res["n"], res["k"]))
+    ds = float(res.get("ds") or 0.0)
+    # ds 是「给定」的、不是拟合出来的：单线/双线必须在文本里写明，否则读到 h 的人会按双线理解。
+    L.append("模型: %s  ratio=%.2f  eta=%s  n=%d  k=%d"
+             % (("ds=0（单线：没有伴线，%d 个独立峰）" % res["nc"]) if ds == 0.0
+                else ("%d 条双峰（Δ=%.3f eV，伴线在 +%.3f eV，面积比 1:%.2f，双峰等宽）"
+                      % (res["nc"], ds, ds, res["ratio"])),
+                res["ratio"], eta_txt, res["n"], res["k"]))
     L.append("拟合优度: rms=%.2f cps   R²(扣背景)=%s   R²(raw)=%s   AIC=%.2f"
              % (res["rms"], res["r2"], res.get("r2_raw"), res["aic"]))
     w = res.get("window") or {}
@@ -601,10 +617,15 @@ def report(res, head="", include_bounds=True, include_warnings=True):
     for i, c in enumerate(res["comps"], 1):
         bd = set(c.get("bounds") or ())
         st = lambda nm: "*" if nm in bd else ""
-        L.append("  组分%d: %.3f%s±%.3f eV (伴线 %.3f)  FWHM %.3f%s±%.3f  area %.0f±%.0f (%.1f%%)  h=%.0f%s"
-                 % (i, c["center"], st("center"), c["center_err"], c["partner"],
+        pair = "" if ds == 0.0 else " (伴线 %.3f)" % c["partner"]
+        # h主 = 主线幅度；h合 = 该峰位处的合计高度（含伴线尾巴）。两者混着读会得出「拟合矮了」的错觉：
+        # ratio=0.5 时 area/(w·af(η)) 恰好 = 1.5×h主（area 是双线合计、height 只是主线）。
+        L.append("  组分%d: %.3f%s±%.3f eV%s  FWHM %.3f%s±%.3f  area %.0f±%.0f (%.1f%%，双线合计)  "
+                 "h主=%.0f%s / h合=%.0f"
+                 % (i, c["center"], st("center"), c["center_err"], pair,
                     c["fwhm"], st("fwhm"), c["fwhm_err"],
-                    c["area"], c["area_err"], c["pct"], c["height"], st("height")))
+                    c["area"], c["area_err"], c["pct"], c["height"], st("height"),
+                    c.get("height_pair", c["height"])))
     rs = res["curves"]["resid"]
     L.append("残差: 均值 %.1f  sd %.1f  最大 |%.0f|" % (sum(rs) / len(rs), math.sqrt(sum(v * v for v in rs) / len(rs)),
                                                      max(abs(v) for v in rs)))
@@ -626,7 +647,7 @@ def write_csv(path, res):
     return path
 
 
-def run(path, centers, bg_kind="file", bg_col=4, ds=1.18, ratio=0.5, eta=0.3, csv=None, scan=0,
+def run(path, centers, bg_kind="file", bg_col=4, ds=0.0, ratio=0.5, eta=0.3, csv=None, scan=0,
         ctol=1.0, wlo=0.6, whi=4.0, hmax=120000.0, lo=None, hi=None):
     E, raw, bgcol, ncol = load(path, bg_col)
     # 窗口在算背景之前就切：linear/shirley 的端点必须取窗口两端，否则窗口外的峰肩会把基线带飞。
@@ -767,7 +788,7 @@ def main(argv):
         i += 2 if v != "1" or (i + 1 < len(a) and not a[i + 1].startswith("--")) else 1
     centers = [float(x) for x in opt.get("centers", "162.0").replace(",", " ").split()]
     res = run(path, centers, opt.get("bg", "file"), int(opt.get("bg-col", 4)),
-              float(opt.get("ds", 1.18)), float(opt.get("ratio", 0.5)),
+              float(opt.get("ds", 0.0)), float(opt.get("ratio", 0.5)),
               float(opt.get("eta", 0.3)), opt.get("csv"), int(opt.get("scan", 0)))
     print(report(res, head="文件: %s" % path))
     for key in sorted(k for k in res if k.startswith("scan")):

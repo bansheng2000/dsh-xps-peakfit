@@ -2724,6 +2724,84 @@ check('J10 面板 %GL 显示逐峰（只看全局 eta 会把 48/100/100/100 显�
   assert.doesNotMatch(src, /Math\.round\(\(typeof template\.eta === 'number' \? template\.eta : 0\.3\) \* 100\)/, '旧的「只读全局 eta」表达式必须删干净');
 });
 
+/* ───────── 20. ds 默认 0（不猜）与高度口径（F1 / F4） ───────── */
+
+process.stdout.write('\n[20] ds 默认 0（不猜）与 height/area 口径\n');
+
+const DSPECTRUM = join(REPO, 'test', 'fixtures', 'ds', 'ni2p_5peak_spectrum.dat');
+
+check('K1 不传 ds 是单线且五峰高度都>0；显式 ds=1.18 会把一个组分压到 0 并撞界', () => {
+  const out = runPy(`
+import json, sys
+sys.path.insert(0, 'server')
+import xps_fit as F
+C = [852.163, 853.216, 855.377, 858.597, 861.297]
+KW = dict(bg_kind='file', lo=849.5, hi=865.49, wlo=0.5, whi=6.0)
+d = F.run(${JSON.stringify(DSPECTRUM)}, C, **KW)
+k = F.run(${JSON.stringify(DSPECTRUM)}, C, ds=1.18, **KW)
+print(json.dumps({
+    'd_ds': d['ds'], 'd_heights': [c['height'] for c in d['comps']],
+    'd_bounds': [c['bounds'] for c in d['comps'] if c['bounds']],
+    'd_r2': d['r2'], 'd_rms': d['rms'],
+    'd_line': F.report(d, include_bounds=False).splitlines()[0],
+    'k_heights': [c['height'] for c in k['comps']],
+    'k_bounds': [c['bounds'] for c in k['comps'] if c['bounds']],
+    'k_r2': k['r2'],
+    'k_line': F.report(k, include_bounds=False).splitlines()[0],
+}, ensure_ascii=False))
+`);
+  const r = JSON.parse(out);
+  assert.equal(r.d_ds, 0, '不传 ds 必须是 0（单线），不许再悄悄按 1.18 套');
+  assert.ok(r.d_heights.every((h) => h > 0), `单线下五个组分都该有高度，实际 ${r.d_heights}`);
+  assert.equal(r.d_bounds.length, 0, `单线不该撞界，实际 ${JSON.stringify(r.d_bounds)}`);
+  assert.ok(r.d_r2 > 0.9979 && r.d_rms < 300, `单线拟合应当是这个谱的正确答案（R²=${r.d_r2} rms=${r.d_rms}）`);
+  assert.match(r.d_line, /ds=0（单线：没有伴线/, `report 必须印明单线，实际：${r.d_line}`);
+  assert.ok(r.k_heights.some((h) => h === 0), `默认套 1.18 就会把组分压到 0（这正是要修的陷阱），实际 ${r.k_heights}`);
+  assert.ok(r.k_bounds.some((b) => b.includes('height')), `被压到 0 的组分必须标撞界 height，实际 ${JSON.stringify(r.k_bounds)}`);
+  assert.ok(r.k_r2 < 0.99, `套错 Δ 的 R² 会明显变差（实测 0.985），实际 ${r.k_r2}`);
+  assert.match(r.k_line, /条双峰（Δ=1\.180 eV/, `显式 ds=1.18 时 report 必须写明双线，实际：${r.k_line}`);
+});
+
+check('K2 源码两层默认都是 0，schema 写明「不传 = 单线」', () => {
+  const fit = readFileSync(join(REPO, 'server', 'xps_fit.py'), 'utf8');
+  assert.match(MCP_SRC, /float\(a\.get\("ds", 0\.0\)\)/, 'MCP 的 do_fit 默认必须是 0');
+  assert.doesNotMatch(MCP_SRC, /a\.get\("ds", 1\.18\)/, 'MCP 里不许再把 1.18 当默认');
+  assert.match(MCP_SRC, /不传 = 0（单线/, 'schema 文案必须说清不传是单线');
+  assert.match(fit, /def fit\(E, raw, bg, centers, ds=0\.0,/, 'fit 的位置参数默认必须是 0');
+  assert.match(fit, /def run\(path, centers, bg_kind="file", bg_col=4, ds=0\.0,/, 'run 的默认必须是 0');
+  assert.doesNotMatch(fit, /float\(opt\.get\("ds", 1\.18\)\)/, 'CLI 入口也不许留 1.18 默认');
+  assert.match(fit, /if 0\.0 < ds < 2\.0/, '_constraint_warnings 不能在 ds=0 时提示伴线口径');
+});
+
+check('K3 height 是主线幅度、area 是双线合计（差恰好 ratio×area_main），报告同时给 h主/h合', () => {
+  const out = runPy(`
+import json, sys
+sys.path.insert(0, 'server')
+import xps_fit as F
+C = [852.163, 853.216, 855.377, 858.597, 861.297]
+r = F.run(${JSON.stringify(DSPECTRUM)}, C, bg_kind='file', lo=849.5, hi=865.49, wlo=0.5, whi=6.0)
+c0 = r['comps'][0]
+print(json.dumps({
+    'ratio': r['ratio'],
+    'comps': [{'h': c['height'], 'hp': c['height_pair'], 'a': c['area'], 'am': c['area_main']} for c in r['comps']],
+    'txt': '\\n'.join(F.report(r, include_bounds=False).splitlines()[3:]),
+    'ds0_line': F.report(r, include_bounds=False).splitlines()[0],
+}, ensure_ascii=False))
+`);
+  const r = JSON.parse(out);
+  assert.equal(r.ratio, 0.5, '这条夹具 ratio 是 0.5');
+  for (const [i, c] of r.comps.entries()) {
+    assert.ok(c.hp > c.h, `组分${i + 1}: h合 必须大于 h主（含伴线尾巴），实际 ${c.hp} vs ${c.h}`);
+    assert.ok(c.am < c.a, `组分${i + 1}: area_main 必须小于 area（area 是双线合计），实际 ${c.am} vs ${c.a}`);
+    const diff = c.a - c.am;
+    assert.ok(Math.abs(diff - r.ratio * c.am) <= Math.max(1, 1e-3 * c.a),
+      `组分${i + 1}: area - area_main 必须 == ratio×area_main（${diff} vs ${r.ratio * c.am}）`);
+  }
+  assert.doesNotMatch(r.txt, /伴线/, 'ds=0 时组分行不许再印「伴线」');
+  assert.match(r.txt, /h主=\d+ \/ h合=\d+/, `组分行要同时给 h主/h合，实际：${r.txt}`);
+  assert.match(r.txt, /\([\d.]+%，双线合计\)/, 'area 后面要标明是双线合计');
+});
+
 /* ───────── 结果 ───────── */
 
 if (failures.length > 0) {

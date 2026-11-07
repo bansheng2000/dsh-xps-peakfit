@@ -345,7 +345,10 @@ def do_fit(a):
     """一次调用完成「拟合 -> 参数±σ -> 优度 -> 可选曲线 CSV」，不启动 GUI。
 
     XPSPeak 的 Optimise 是无约束优化（实测会把 2p1/2 压成面积 1/6，物理上错误），
-    所以「要可发表的结果」必须走这里；GUI 只用于人工看/交付 .xps。"""
+    所以「要可发表的结果」必须走这里；GUI 只用于人工看/交付 .xps。
+
+    ds 不给 = 0.0（单线，不猜）。双线必须显式给 Δ：不给就按 1.18 套会静默毁掉别的元素
+    （Ni 2p 实测：默认 1.18 时第 2 个组分峰高被压到 0、R² 0.997957→0.985095、rms 276.76→747.54）。"""
     win = a.get("window") or []
     lo = hi = None
     if win:
@@ -355,7 +358,7 @@ def do_fit(a):
     centers = [float(c) for c in a["centers"]]
     eta = _parse_eta(a.get("eta", 0.3), len(centers))
     res = F.run(a["path"], centers, a.get("bg", "file"),
-                int(a.get("bg_col", 4)), float(a.get("ds", 1.18)),
+                int(a.get("bg_col", 4)), float(a.get("ds", 0.0)),
                 float(a.get("ratio", 0.5)), eta,
                 a.get("csv"), int(a.get("scan", 0)),
                 float(a.get("ctol", 1.0)), float(a.get("wlo", 0.6)),
@@ -889,7 +892,7 @@ TOOLS = [
       "bg": {"type": "string", "enum": ["file", "linear", "shirley", "none"],
              "description": "背景来源：file=用文件自带背景列（默认，最稳）；linear/shirley=自己算；none=不扣"},
       "bg_col": {"type": "number", "description": "背景列序号（1 起），默认 4"},
-      "ds": {"type": "number", "description": "自旋轨道劈裂 ΔBE（eV）：S 2p=1.18，其他元素按文献值，默认 1.18"},
+      "ds": {"type": "number", "description": "自旋轨道劈裂 ΔBE（eV）。不传 = 0（单线、没有伴线，不猜）；要双线必须显式给：S 2p=1.18，d 轨道面积比 2/3，其他元素按文献值"},
       "ratio": {"type": "number", "description": "伴线/主峰面积比，2p=0.5，d 轨道=2/3，默认 0.5"},
       "eta": {"type": ["number", "array", "string"], "description": "%Lorentzian（0-1）：一个数=全部峰同值；数组或逗号串（如 0.48,1.0,1.0）=逐峰。实测谱常是主峰 0.4–0.5、卫星 1.0，别用标量糊过去"},
       "expect_bg": {"type": "string", "enum": ["shirley", "linear", "file", "none"], "description": "模板要求的背景；给了就与实际 bg 比对，不一致判失败。file = 用谱图自带的 Background 列"},

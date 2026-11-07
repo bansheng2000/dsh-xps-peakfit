@@ -2773,33 +2773,67 @@ check('K2 源码两层默认都是 0，schema 写明「不传 = 单线」', () =
   assert.match(fit, /if 0\.0 < ds < 2\.0/, '_constraint_warnings 不能在 ds=0 时提示伴线口径');
 });
 
-check('K3 height 是主线幅度、area 是双线合计（差恰好 ratio×area_main），报告同时给 h主/h合', () => {
+check('K3 双线时 height 是主线幅度、area 是双线合计（差恰好 ratio×area_main），报告同时给 h主/h合', () => {
+  const out = runPy(`
+import json, os, sys
+sys.path.insert(0, 'server')
+import xps_fit as F
+p = os.path.join(${JSON.stringify(tmp)}, 'k3_doublet.dat')
+E = [844.0 + 0.1 * i for i in range(161)]
+y = [F.gl(x, 852.0, 1.2, 10000.0, 0.3) + F.gl(x, 853.18, 1.2, 5000.0, 0.3) for x in E]
+with open(p, 'w') as fh:
+    for x, v in zip(E, y):
+        fh.write('%.3f,%.4f\\n' % (x, v))
+r = F.run(p, [852.0], bg_kind='none', ds=1.18, ratio=0.5, eta=0.3, wlo=0.5, whi=3.0)
+c = r['comps'][0]
+print(json.dumps({
+    'ratio': r['ratio'], 'rms': r['rms'], 'ds': r['ds'],
+    'h': c['height'], 'hp': c['height_pair'], 'a': c['area'], 'am': c['area_main'],
+    'txt': '\\n'.join(F.report(r, include_bounds=False).splitlines()[1:]),
+}, ensure_ascii=False))
+`);
+  const r = JSON.parse(out);
+  assert.equal(r.ratio, 0.5, '这条夹具 ratio 是 0.5');
+  assert.equal(r.ds, 1.18, '双线语义下 ds 必须是 1.18');
+  assert.ok(Math.abs(r.h - 10000) < 200, `主线幅度应还原成 10000（合成谱给的就是它），实际 ${r.h}`);
+  assert.ok(r.hp > r.h, `h合 必须大于 h主（含伴线尾巴），实际 ${r.hp} vs ${r.h}`);
+  assert.ok(r.am < r.a, `area_main 必须小于 area（area 是双线合计），实际 ${r.am} vs ${r.a}`);
+  const diff = r.a - r.am;
+  assert.ok(Math.abs(diff - r.ratio * r.am) <= Math.max(1, 1e-3 * r.a),
+    `area - area_main 必须 == ratio×area_main（${diff} vs ${r.ratio * r.am}）`);
+  assert.match(r.txt, /h主=\d+ \/ h合=\d+/, `组分行要同时给 h主/h合，实际：${r.txt}`);
+  assert.match(r.txt, /\([\d.]+%，双线合计\)/, '双线时 area 后面要标明是双线合计');
+});
+
+check('K3b 单线（ds=0）不许叠共位伴线：h合=h主、area=area_main，且 ratio 不改变读数与曲线', () => {
   const out = runPy(`
 import json, sys
 sys.path.insert(0, 'server')
 import xps_fit as F
 C = [852.163, 853.216, 855.377, 858.597, 861.297]
-r = F.run(${JSON.stringify(DSPECTRUM)}, C, bg_kind='file', lo=849.5, hi=865.49, wlo=0.5, whi=6.0)
-c0 = r['comps'][0]
+kw = dict(bg_kind='file', lo=849.5, hi=865.49, wlo=0.5, whi=6.0)
+a = F.run(${JSON.stringify(DSPECTRUM)}, C, ds=0.0, ratio=0.5, **kw)
+b = F.run(${JSON.stringify(DSPECTRUM)}, C, ds=0.0, ratio=0.0, **kw)
 print(json.dumps({
-    'ratio': r['ratio'],
-    'comps': [{'h': c['height'], 'hp': c['height_pair'], 'a': c['area'], 'am': c['area_main']} for c in r['comps']],
-    'txt': '\\n'.join(F.report(r, include_bounds=False).splitlines()[3:]),
-    'ds0_line': F.report(r, include_bounds=False).splitlines()[0],
+    'comps': [{'h': c['height'], 'hp': c['height_pair'], 'a': c['area'], 'am': c['area_main']} for c in a['comps']],
+    'h_a': [c['height'] for c in a['comps']], 'h_b': [c['height'] for c in b['comps']],
+    'area_a': [c['area'] for c in a['comps']], 'area_b': [c['area'] for c in b['comps']],
+    'rms': [a['rms'], b['rms']],
+    'first': F.report(a, include_bounds=False).splitlines()[0],
+    'txt': '\\n'.join(F.report(a, include_bounds=False).splitlines()[3:]),
 }, ensure_ascii=False))
 `);
   const r = JSON.parse(out);
-  assert.equal(r.ratio, 0.5, '这条夹具 ratio 是 0.5');
   for (const [i, c] of r.comps.entries()) {
-    assert.ok(c.hp > c.h, `组分${i + 1}: h合 必须大于 h主（含伴线尾巴），实际 ${c.hp} vs ${c.h}`);
-    assert.ok(c.am < c.a, `组分${i + 1}: area_main 必须小于 area（area 是双线合计），实际 ${c.am} vs ${c.a}`);
-    const diff = c.a - c.am;
-    assert.ok(Math.abs(diff - r.ratio * c.am) <= Math.max(1, 1e-3 * c.a),
-      `组分${i + 1}: area - area_main 必须 == ratio×area_main（${diff} vs ${r.ratio * c.am}）`);
+    assert.equal(c.hp, c.h, `组分${i + 1}: 单线时 h合 必须等于 h主（没有伴线可叠），实际 ${c.hp} vs ${c.h}`);
+    assert.equal(c.am, c.a, `组分${i + 1}: 单线时 area 必须等于 area_main，实际 ${c.am} vs ${c.a}`);
   }
-  assert.doesNotMatch(r.txt, /伴线/, 'ds=0 时组分行不许再印「伴线」');
-  assert.match(r.txt, /h主=\d+ \/ h合=\d+/, `组分行要同时给 h主/h合，实际：${r.txt}`);
-  assert.match(r.txt, /\([\d.]+%，双线合计\)/, 'area 后面要标明是双线合计');
+  assert.deepEqual(r.h_a, r.h_b, '单线时 ratio 不许改变峰高（共位伴线是幽灵，会把 h 压成 1/(1+ratio)）');
+  assert.deepEqual(r.area_a, r.area_b, '单线时 ratio 不许改变面积');
+  assert.deepEqual(r.rms, r.rms, '单线时 ratio 不许改变拟合优度');
+  assert.match(r.first, /ds=0（单线/, '报告首行必须写明单线');
+  assert.match(r.txt, /\([\d.]+%，单线\)/, '单线时 area 后面要标明是单线');
+  assert.doesNotMatch(r.txt, /双线合计/, '单线时不许出现「双线合计」');
 });
 
 /* ───────── 21. 审计自动发现 run.json（F3）与截断汇总（F6） ───────── */

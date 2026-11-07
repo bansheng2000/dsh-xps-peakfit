@@ -138,7 +138,11 @@ def model_at(x, p, nc, ds, ratio, eta):
     y = 0.0
     for k in range(nc):
         c, w, h = p[3 * k], p[3 * k + 1], p[3 * k + 2]
-        y += gl(x, c, w, h, et[k]) + gl(x, c + ds, w, h * ratio, et[k])
+        y += gl(x, c, w, h, et[k])
+        # ds=0 或 ratio=0 = 单线：不能再叠一条共位的「伴线」，否则模型实际是 (1+ratio) 倍的单峰——
+        # 曲线长得一样，可 h 会被压成 1/(1+ratio)、area_main 只剩那个份额，读数全错。
+        if ds and ratio:
+            y += gl(x, c + ds, w, h * ratio, et[k])
     return y
 
 
@@ -341,13 +345,13 @@ def fit(E, raw, bg, centers, ds=0.0, ratio=0.5, eta=0.3,
     comps = []
     for i in range(nc):
         c, w, h = p[3 * i], p[3 * i + 1], p[3 * i + 2]
+        pair_on = bool(ds) and ratio != 0.0       # 单线时没有伴线：面积就是单线面积
         af1 = area_factor(et[i])                  # 单线：高度 -> 面积
-        af = af1 * (1.0 + ratio)                  # 双线合计（含伴线）
+        af = af1 * (1.0 + ratio) if pair_on else af1   # 双线合计（含伴线）
         area = h * w * af
         area_main = h * w * af1
-        # 该峰位处的**合计高度**：主线 + 伴线在 c 处的尾巴。
-        # ds=0（单线）时两条线重合，按定义退化成 h*(1+ratio)；ratio=0 时就是 h 本身。
-        height_pair = h + gl(c, c + ds, w, h * ratio, et[i])
+        # 该峰位处的**合计高度**：主线 + 伴线在 c 处的尾巴；单线时就是 h 本身。
+        height_pair = h + gl(c, c + ds, w, h * ratio, et[i]) if pair_on else h
         # σ_area 传播：area = h·w·af（af 只依赖 eta，与峰位无关）。只保留真正进公式的两项：
         #   · 补上 height 项 —— 原来漏了，σ 系统性偏小（本次修正的主项）；
         #   · 去掉 center 项 —— 峰位不参与面积公式，原来那一项是错项。
@@ -628,17 +632,18 @@ def report(res, head="", include_bounds=True, include_warnings=True):
     if include_warnings:
         for msg in (res.get("warnings") or []):
             L.append(msg)
+    area_tag = "双线合计" if (ds != 0.0 and float(res.get("ratio") or 0.0) != 0.0) else "单线"
     for i, c in enumerate(res["comps"], 1):
         bd = set(c.get("bounds") or ())
         st = lambda nm: "*" if nm in bd else ""
         pair = "" if ds == 0.0 else " (伴线 %.3f)" % c["partner"]
         # h主 = 主线幅度；h合 = 该峰位处的合计高度（含伴线尾巴）。两者混着读会得出「拟合矮了」的错觉：
         # ratio=0.5 时 area/(w·af(η)) 恰好 = 1.5×h主（area 是双线合计、height 只是主线）。
-        L.append("  组分%d: %.3f%s±%.3f eV%s  FWHM %.3f%s±%.3f  area %.0f±%.0f (%.1f%%，双线合计)  "
+        L.append("  组分%d: %.3f%s±%.3f eV%s  FWHM %.3f%s±%.3f  area %.0f±%.0f (%.1f%%，%s)  "
                  "h主=%.0f%s / h合=%.0f"
                  % (i, c["center"], st("center"), c["center_err"], pair,
                     c["fwhm"], st("fwhm"), c["fwhm_err"],
-                    c["area"], c["area_err"], c["pct"], c["height"], st("height"),
+                    c["area"], c["area_err"], c["pct"], area_tag, c["height"], st("height"),
                     c.get("height_pair", c["height"])))
     rs = res["curves"]["resid"]
     L.append("残差: 均值 %.1f  sd %.1f  最大 |%.0f|" % (sum(rs) / len(rs), math.sqrt(sum(v * v for v in rs) / len(rs)),

@@ -12,7 +12,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, request as createHttpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -2800,6 +2800,93 @@ print(json.dumps({
   assert.doesNotMatch(r.txt, /伴线/, 'ds=0 时组分行不许再印「伴线」');
   assert.match(r.txt, /h主=\d+ \/ h合=\d+/, `组分行要同时给 h主/h合，实际：${r.txt}`);
   assert.match(r.txt, /\([\d.]+%，双线合计\)/, 'area 后面要标明是双线合计');
+});
+
+/* ───────── 21. 审计自动发现 run.json（F3）与截断汇总（F6） ───────── */
+
+process.stdout.write('\n[21] 审计自动发现 run.json（F3）与边界截断汇总（F6）\n');
+
+const k4dir = join(tmp, 'k4');
+mkdirSync(k4dir, { recursive: true });
+const k4spec = join(k4dir, 'k4_spectrum.dat');
+const k4peaks = join(k4dir, 'k4_peaks.dat');
+copyFileSync(b3spec, k4spec);
+copyFileSync(b3peaks, k4peaks);
+const k4run = join(k4dir, 'run.json');
+writeFileSync(
+  k4run,
+  `${JSON.stringify({
+    templateId: 'tpl-k4',
+    createdAt: '2026-11-07T00:00:00.000Z',
+    artifacts: [
+      { path: k4spec, sha256: sha256(readFileSync(k4spec)) },
+      { path: k4peaks, sha256: sha256(readFileSync(k4peaks)) },
+    ],
+  }, null, 1)}\n`,
+  'utf8',
+);
+// 隔壁目录的 run.json 登记的是别的产物：不能拿来当这份的凭证
+const k4other = join(tmp, 'k4other');
+mkdirSync(k4other, { recursive: true });
+const k4otherSpec = join(k4other, 'other_spectrum.dat');
+const k4otherPeaks = join(k4other, 'other_peaks.dat');
+copyFileSync(b3spec, k4otherSpec);
+copyFileSync(b3peaks, k4otherPeaks);
+// 这份 run.json 登记的是**另一批文件**（不在这条审计链上）：归属对不上就不能拿来当凭证
+writeFileSync(
+  join(k4other, 'run.json'),
+  `${JSON.stringify({ templateId: 'tpl-other', artifacts: [{ path: join(k4other, 'someone_else.dat'), sha256: 'f'.repeat(64) }] })}\n`,
+  'utf8',
+);
+
+const k4srv = createServer(createRoutes({ root, env: { ...process.env, XPSPEAK_ROOT: root, XPSPEAK_MODE: '', XPSPEAK_MODE_FILE: '' } }));
+await new Promise((r) => k4srv.listen(0, '127.0.0.1', r));
+const k4port = k4srv.address().port;
+const k4auto = await request(k4port, '/xps/audit', {
+  method: 'POST',
+  body: JSON.stringify({ spectrumPath: k4spec, peaksPath: k4peaks }),
+});
+const k4foreign = await request(k4port, '/xps/audit', {
+  method: 'POST',
+  body: JSON.stringify({ spectrumPath: k4otherSpec, peaksPath: k4otherPeaks }),
+});
+await new Promise((r) => k4srv.close(r));
+
+check('K4 不带 runPath 时自动用同目录的 run.json（只认同目录且能对上归属的那份）', () => {
+  assert.equal(k4auto.status, 200, JSON.stringify(k4auto.json));
+  assert.equal(k4auto.json.runPath_source, 'auto', `必须标成自动发现，实际 ${JSON.stringify(k4auto.json.runPath_source)}`);
+  assert.equal(k4auto.json.runPath, k4run, '回包顶层要回显真正用到的那份 run.json');
+  const byId = Object.fromEntries(k4auto.json.checks.map((c) => [c.id, c]));
+  assert.equal(byId['uncontrolled'], undefined, `已经用了凭证就不该再有 uncontrolled，实际 ${JSON.stringify(byId['uncontrolled'])}`);
+  assert.equal(byId['artifacts-modified'].status, 'pass', byId['artifacts-modified'].detail);
+
+  // 归属对不上：隔壁目录的 run.json 登记的是别人，必须当没有（不能把 fail 洗成 pass）
+  assert.equal(k4foreign.json.runPath, null, `不属于这份产物的 run.json 不许用，实际 ${JSON.stringify(k4foreign.json.runPath)}`);
+  assert.equal(k4foreign.json.runPath_source, null);
+  const fById = Object.fromEntries(k4foreign.json.checks.map((c) => [c.id, c]));
+  assert.equal(fById['uncontrolled'].status, 'warn', fById['uncontrolled'].detail);
+});
+
+check('K5 边界截断汇总成一条（最坏的那条进正文，逐峰明细进 details）', () => {
+  const out = runPy(`
+import json, sys
+sys.path.insert(0, 'server')
+import xps_fit as F
+E = [round(860 + i * 0.1, 1) for i in range(201)]
+comps = [{'center': 860.5, 'fwhm': 4.0}, {'center': 861.2, 'fwhm': 4.0}, {'center': 862.0, 'fwhm': 4.0},
+         {'center': 863.0, 'fwhm': 4.0}, {'center': 864.0, 'fwhm': 4.0}]
+pf = F.preflight({'comps': comps}, E=E)
+print(json.dumps({'warnings': pf['warnings'], 'details': pf.get('details', {})}, ensure_ascii=False))
+`);
+  const r = JSON.parse(out);
+  const trunc = r.warnings.filter((w) => w.includes('边界截断'));
+  assert.equal(trunc.length, 1, `五个峰都近端也只能有一条汇总，实际 ${JSON.stringify(r.warnings)}`);
+  assert.equal(r.warnings.length, 1, `这条用例只该有截断一条 warning，实际 ${JSON.stringify(r.warnings)}`);
+  assert.match(trunc[0], /5 个峰心距谱端不到 3×FWHM/, trunc[0]);
+  assert.match(trunc[0], /最坏是组分1 860\.50 eV，距 0\.50 eV = 0\.12×FWHM/, trunc[0]);
+  assert.equal(r.details['boundary-truncation'].length, 5, '逐峰明细必须 5 项');
+  assert.deepEqual(r.details['boundary-truncation'][0], { index: 1, center: 860.5, fwhm: 4.0, gap_ev: 0.5, ratio: 0.125 });
+  assert.doesNotMatch(JSON.stringify(r.warnings), /组分\d+（[\d.]+ eV）峰心距谱端不到/, '逐峰各报一条的旧写法必须删干净');
 });
 
 /* ───────── 结果 ───────── */

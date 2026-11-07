@@ -1,5 +1,15 @@
 # 变更记录
 
+## 第十七批 B：审计自动发现 run.json（F3）+ 边界截断汇总（F6）
+
+版本仍 `2.8.0`。
+
+- **问题（F3）**：面板「审计这份」只传 `spectrumPath`/`peaksPath`/`templateId`，从不传 `runPath`，于是同一目录明明有 `run.json`，`uncontrolled` 也永远 warn、`summary.runPath` 永远 `null`；回包顶层还没有这个字段。用户看到的是「有凭证也说过没凭证」。
+- **改法**：新增 `findAutoRunJson()`（`lib/routes.js`，可单测）：在谱/峰所在目录找 `run.json`，但只认**确实是这份产物**的那份——`artifacts` 里登记了本次审计的谱或峰，或它的 `spectrumSha256` 等于本次谱的哈希；归属对不上就当没有（宁可 `uncontrolled` warn，也不拿隔壁那次跑的凭证把 fail 洗成 pass）。`/xps/audit` 回包新增顶层 `runPath` 与 `runPath_source`（`body`/`auto`/`null`），面板结果表加一行「交付凭证」，写清是自动发现还是请求里给的、以及没有时为什么 warn。
+- **问题（F6）**：`preflight` 对边界截断逐峰 `append` 一条，五个峰就五行几乎同义的话。
+- **改法**：`server/xps_fit.py` 改成汇总一条——正文写「N 个峰心距谱端不到 3×FWHM（最坏是组分 k，距 x eV = y×FWHM）」，逐峰明细进 `details["boundary-truncation"]`（`index`/`center`/`fwhm`/`gap_ev`/`ratio`），`preflight` 返回值新增 `details`。
+- **自检**：新增 [21] 段 K4（不带 `runPath` 调审计 → `runPath_source=auto`、顶层 `runPath` 回显、`artifacts-modified` pass、无 `uncontrolled`；隔壁目录登记别人的 `run.json` 必须 `null` + `uncontrolled` warn）、K5（五峰全近端 → 只有一条截断 warning、`details` 5 项、最坏是组分 1 0.12×FWHM、旧的逐峰写法不许残留）。先红：旧代码 `FAIL K4 …: 必须标成自动发现，实际 undefined`、`FAIL K5 …: 0 !== 1`（passed 148）。两处变异各真红：关掉自动发现 → K4「实际 null」；截断改回逐峰 → K5（5 行）。
+
 ## 第十七批 A：`ds` 默认改 0（不猜）+ 峰高/面积口径写明（F1 / F4）
 
 版本仍 `2.8.0`。

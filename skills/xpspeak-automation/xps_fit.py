@@ -490,7 +490,8 @@ def preflight(res, E=None, bg_used=None, expect_bg=None, edge_ratio=3.0, bg_col=
       5. 优度与残差结构：R² < 0.85 阻断、< 0.90 警告；残差四段任一段 |均值| > 0.5×rms 阻断（系统性偏移）；
       6. 峰顶缺口：max|data−fit|/峰高 > 10% 阻断、> 5% 警告；linear 模板还要核「文件里的背景列是不是直线」。
 
-    返回 {"ok": bool, "errors": [...], "warnings": [...]}。errors 非空 → 调用方必须中止、不写文件。
+    返回 {"ok": bool, "errors": [...], "warnings": [...], "details": {...}}。errors 非空 → 调用方必须中止、
+    不写文件。边界截断汇总成一条 warning（最坏的那个写在正文，逐峰明细放 details["boundary-truncation"]）。
     """
     errors, warnings = [], []
     b = res.get("bound") or []
@@ -547,8 +548,10 @@ def preflight(res, E=None, bg_used=None, expect_bg=None, edge_ratio=3.0, bg_col=
                           "（第 %d 点，= 峰高 %.1f%%，容差 %.2f%%）—— 文件里的背景不是拟合用的那条直线。"
                           % (bs["max_dev"], bs["at_index"], bs["pct_of_height"] or 0.0, 100.0 * BG_SHAPE_TOL))
 
+    details = {}
     if E:
         lo, hi = min(E), max(E)
+        hits = []
         for i, c in enumerate(res.get("comps") or []):
             fw = float(c.get("fwhm") or 0.0)
             if fw <= 0:
@@ -557,9 +560,16 @@ def preflight(res, E=None, bg_used=None, expect_bg=None, edge_ratio=3.0, bg_col=
             right = hi - float(c.get("partner", c["center"]))
             near = min(left, right)
             if near < edge_ratio * fw:
-                warnings.append("组分%d（%.2f eV）峰心距谱端不到 %.0f×FWHM（实测 %.2f×）：尾部被截断，面积只按当前窗口积分。"
-                                % (i + 1, float(c["center"]), edge_ratio, near / fw))
-    return {"ok": not errors, "errors": errors, "warnings": warnings}
+                hits.append({"index": i + 1, "center": round(float(c["center"]), 3), "fwhm": round(fw, 3),
+                             "gap_ev": round(near, 3), "ratio": round(near / fw, 3)})
+        if hits:
+            # 逐峰各报一条时，五个峰就是五行几乎同义的话；汇总成一条、明细放 details，读的人先看最坏的那个。
+            worst = min(hits, key=lambda h: h["ratio"])
+            details["boundary-truncation"] = hits
+            warnings.append("边界截断：%d 个峰心距谱端不到 %.0f×FWHM（最坏是组分%d %.2f eV，距 %.2f eV = %.2f×FWHM）："
+                            "这些峰尾部被切掉，面积只按当前窗口积分。逐峰明细见 details.boundary-truncation。"
+                            % (len(hits), edge_ratio, worst["index"], worst["center"], worst["gap_ev"], worst["ratio"]))
+    return {"ok": not errors, "errors": errors, "warnings": warnings, "details": details}
 
 
 def preflight_text(pf):

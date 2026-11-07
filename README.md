@@ -1,117 +1,71 @@
 # dsh-xps-peakfit
 
-XPS 分峰拟合 SOP —— 一个给 AI agent 用的 skill（Agent Skills 目录形态，`SKILL.md` + `references/`）。
+XPS 分峰拟合的固定四步 SOP（荷电校正 → 全谱分析 → 高分辨分峰 → 峰位移），执行软件 XPSPeak 4.1。
+拿到谱、要化学态归属或峰位移结论时用本 skill；只想让 AI 操作 XPSPeak 界面（开谱、加分峰、导出），用配套的 `xpspeak-automation`。
 
-仓库：<https://github.com/bansheng2000/dsh-xps-peakfit>
+## 安装
 
-**四个步骤，名称与顺序是硬约束**（不得新增、删除、重命名或打乱）：
+插件装进 DSH profile：`dependencies` 与 `dsh.profile.bundles` 两处都要有它，只写依赖会被 `pnpm install` prune 掉。
 
-| # | 步骤 | 产物（第六节产物契约） |
-|---|---|---|
-| 1 | 荷电校正 | `01_charge_correction.md` + 校正后谱图 |
-| 2 | 全谱分析 | `02_survey_elements.md` |
-| 3 | 高分辨分峰 | `03_peakfit_<样品>_<轨道>.md` + 图 + 曲线数据 + XPSPeak 状态文件（`.xps` / `.rpa`） |
-| 4 | 峰位移分析 | `04_shift_analysis.md` |
-| — | 交付 | `05_deliverables.md` + 交付包；全程维护 `xps_run_record.md`（第七节） |
+```powershell
+cd C:\Users\12576\.dsh\profiles\desktop
+pnpm add -D dsh-xps-peakfit@file:E:/文档/deepseek-harness/dsh-xps-peakfit
+```
 
-每一步都写齐：**输入 → 处理目标 → 输出 → 注意事项 → 门槛**。软件侧映射到 **XPSPeak 4.1** 的面板操作（附录 A：菜单/字段 ↔ 四步）。
+重启 DSH 后确认：侧栏出现「XPS 模板」页，连接器里出现 `custom-xpspeak`（`serverName=xpspeak`、`injectionMode=always`）。
 
-## 关键机制
+## 快速开始
 
-- **通过门槛**：每步末尾有一组勾选项，上一步门槛未过就停在该步，不往后做。例如步骤 3：每峰有物理依据、约束可逐项追溯到用户确认、残差无系统性结构、优度达标（达标判据由用户给定）。
-- **产物契约**：每步固定文件名与最小字段，文件名以步骤号开头，顺序即执行顺序；原始数据目录只读。
-- **结论必须有依据**：每条结论写成 `claim` / `依据（哪一步、哪个产物）` / `置信状态（支撑｜不可区分｜不支持｜不足以判定｜未验证）` / `备选解释`；缺依据自动降级为「不足以判定」（第九节）。
-- **项目记录与续接**：`xps_run_record.md` 记录样品清单、逐样品 ΔE、各轨道约束、产物路径、未决问题；新会话**先读记录并逐个核对产物文件真实存在**，不凭旧完成标记跳过（第七节）。
-- **步内 mode**：默认「执行」；「诊断」模式只读、只列问题，不改数、不自动转成修改（第二节）。
-- **待确认问题表**：信息缺失项在第八节表化列出，并标注「阻塞 / 可延后」，不在缺信息时替用户假设。
-- **出图分工**：数据与判定归本 skill；交给绘图 skill 的「出图委派包」共 10 项（数据文件 / 系列表 / 双线绘制约定 / 标注文本 / 轴 / 页面 / 禁止项 / 交付 / 验收），清单见 `SKILL.md` 第六节约定；要按参考图复刻排版/配色走 `dsh-origin-replica`（本 skill 只交数据、系列与标注、版面约束与禁止项），Origin 工具级细节走 `origin-plotting`。
-- **Origin 收尾显示窗口**：出完最后一张 Origin 图（或交付完成）调 `origin_reveal` / `origin_release` 把 Origin 窗口显示出来并确认 `visible_after` 为真；不这么做，任务结束后只剩一个**看不见的 Origin 后台实例**（COM 拉起默认隐藏），用户既没法直接看/存/关，还挡住下次开 Origin。
+1. 导入：模板页上传 `.xps`，生成草稿——峰位、FWHM、%GL、面积、背景类型、拟合窗口全部取自软件导出的文本，不解析二进制。
+2. 补必填：`element` / `orbital` 能从文件名认出就预填，认不出必须手填；`category` 默认「高分辨谱」。
+3. 选模板：点「选这个」写入 `selection.json`，之后的 fit / build 都以它为约定。
+4. 拟合：`xpspeak_fit`（纯 Python，不开 GUI）出峰参数；撞界、残差分段、峰顶缺口不过就回去调。
+5. 落盘：`xpspeak_build` 按这组参数生成原生 `.xps`，保存前用同一套门槛复算一遍。
+6. 审计：`/xps/audit` 复核产物与模板是否一致（同目录有 `run.json` 会自动采用），`/xps/runlog` 写交付凭证。
 
-## 交付物（缺一项即未交付）
+全程只用这 9 个固定工具名：`xpspeak_status`、`xpspeak_open`、`xpspeak_export`、`xpspeak_save`、`xpspeak_menu`、`xpspeak_click`、`xpspeak_close`、`xpspeak_fit`、`xpspeak_build`。
 
-- 步骤产物 `01`–`04` + `05_deliverables.md`
-- **XPSPeak 保存文件**：`.xps`（谱图 + 背景 + 已定峰，可原样载回）/ `.rpa`（只存区域峰参数）
-- **Origin 保存文件**：工程文件（如 `.opju`），图能继续编辑
-- 图（PNG / PDF / TIF / SVG）+ 导出的 ASCII 与峰参数表
-- **交付前必做「载回校验」**：`.xps` 重新载入、Origin 工程重新打开，峰参数/图页与产物表一致
-- **残差不进成品图，但必须进交付物**：成品图不画残差子图；残差判定（拟合优度 + 是否含系统性结构 + 判定依据）必须写进 `03_peakfit_*.md` 与报告
+最小模板骨架（字段全貌见 `SKILL.md`）：
 
-## 文件
+```json
+{ "name": "Ni 2p", "category": "高分辨谱", "element": "Ni", "orbital": "2p",
+  "background": "shirley", "doublet_delta_ev": null, "charge_correction_ev": null,
+  "peak_windows": [{ "center_ev": 852.884, "eta": 0.48, "observed": { "fwhm_ev": 1.93, "gl_pct": 48 } }],
+  "fwhm_min": 1.4475, "fwhm_max": 2.4125, "fit_window_ev": { "lo": 847.094, "hi": 865.49 } }
+```
 
-| 路径 | 内容 |
-|---|---|
-| `SKILL.md` | 技能正文（十一节）：〇 用途与边界 · 一 铁律 · 二 触发条件与使用方式 · 三 整体输入要求 · 四 整体输出要求 · 五 四个步骤（含附录 A XPSPeak 4.1 执行映射、附录 B 分轮放开与检查点，及步骤 3 的「基准参数快照」）· 六 产物契约与交付物清单 · 七 项目记录与续接 · 八 待确认问题 · 九 结论字段规范 · 十 禁止事项 · 十一 科学边界 |
-| `references/deliverable-templates.md` | `01`–`04` 产物与 `xps_run_record.md` 的可直接填空骨架（字段名不要改，未获取的项写「待确认」，不留空、不猜） |
-| `references/peakfit-baseline-snapshot.md` | 基准参数快照：仅当沿用那张参考截图时适用，不作为通用默认值 |
-| `package.json` / `cordis.patch.yml` | 插件包声明（`files` 必须列全运行期文件）与 bundle patch（`- insert:` 形态） |
-| `lib/index.js` | 插件入口：`server/*.py` sha256 同步 + 挂 `/xps` 路由 |
-| `lib/routes.js` | 模板存取、SVG 缩略图、「用这个」指令、回环校验、档位读取 |
-| `lib/client.js` | 右侧栏「XPS 模板」标签（免构建，宿主 ModuleLoader 注入） |
-| `server/*.py` | XPSPeak 驱动的三个 py —— **唯一源**（安装位由壳按 sha256 用包内副本覆盖，不手改安装位） |
-| `skills/xpspeak-automation/` | 第二个技能（软件自动化）：`SKILL.md` + 三个 py 的技能内副本（单独安装用，本仓库仍以 `server/` 为准） |
-| `check_skills.py` | 触发词去重与双向互指核对（C1–C4）：`py check_skills.py` |
-| `sync_skills.py` | 技能副本同步与漂移核对：`py sync_skills.py --check` |
-| `legacy/dsh-xpspeak/` | 旧仓库整仓只读存档（含 `.git` 与历史，被 `.gitignore` 忽略） |
-| `docs/v2.4-figure-routing.md` | 2026-10-19「分峰不等同于复刻」的决策记录（纯档案，无文件引用） |
-| `test/selftest.mjs` | 自检：模板 CRUD / 路由状态码 / 拒绝路径 / sha256 两分支 / tab 契约 / 无 MCP 调用（`node test/selftest.mjs`） |
+## 关键概念与限制
 
-版本号与完整变更见 `CHANGELOG.md`（当前 v2.9.0）。本 README 不再内联变更摘要，版本只维护 `CHANGELOG.md` 一处。
+| 约定 | 说明 |
+| --- | --- |
+| 模板只管拟合约定 | 峰位、FWHM 带、逐峰 eta、背景类型、拟合窗口、约束；显示设置、平滑、配色都不进模板 |
+| 双线不猜 | 2.9.0 起 `ds` 默认 0：不传就是单线；要伴线必须显式给 Δ，模板 `doublet_delta_ev` 为 `null` 时同样是单线 |
+| 模板不跨元素复用 | 一个模板对应一个元素 + 轨道的一组谱；换元素或换卫星结构要另建 |
+| FWHM 带带来源 | `fwhm_min/max` 是标定源谱实测 ±25%，来源记在 `provenance.fwhm_band_source`，换样品不一定适用 |
+| 硬闸会阻断 | 撞界、背景口径不一致、优度不过（R²(扣背景)<0.85、残差段>0.5×rms、缺口>10%）都拒绝保存；只有 `force:true` 放行且写进 `run.json` |
+| 面积回读有系统偏差 | 2–5%，宽峰更甚；别设 1% 硬闸 |
 
-## 插件壳与模板页（v2.9.0）
+## 数据目录
 
-本仓库同时是 DSH 插件包（`package.json` + `lib/index.js` + `cordis.patch.yml`），壳只做两件事：
+```
+~/.dsh/dsh-xps-peakfit/
+  templates/<id>/meta.json   模板（导入草稿或手写；`.rpa` 不支持，只有区域峰参数、没有谱）
+  imports/<时间戳>.json      导入草稿，只留最近 20 份；上传上限 20 MB
+  mode.json                  档位真源：teach（只读讲解）/ exec（代执行）
+  selection.json             当前选中模板；模板被删后标 stale 并给出原因
+  run.json                   交付凭证，落在产物目录，不在本根
+```
 
-- **三个 py 同步**：包内 `server/*.py` 与安装位 `~/.dsh/dsh-xps-peakfit/server/` 比 sha256，不一致**以包内为准**覆盖并写一行日志（`旧 → 新`）。反向覆盖是禁止的。MCP 连接器 `custom-xpspeak` 指向安装位，所以 `files` 字段漏一个文件就等于装完缺文件。
-- **模板页路由 `/xps`**：`GET /xps/templates`、`POST /xps/templates?filename=a.json`、`POST /xps/templates/<id>/{rename,use}`、`DELETE /xps/templates/<id>`、`POST /xps/favorites`、`GET /xps/thumb/<id>`。全部只接受回环请求（Host + peer 双查），其余 403。
+## 故障排查
 
-侧栏标签：`id = kind = 槽位 key = "xps"`（三者必须同一字符串），显示名「XPS 模板」，另注册一个不带 `guide` 的兼容别名 `xps-templates`。
+| 现象 | 处置 |
+| --- | --- |
+| 409 `runlog-exists` | 该目录已有凭证；确认是同一产物后加 `overwrite:true` 重写，否则换输出目录 |
+| 415 `rpa-not-supported` | `.rpa` 只存区域峰参数、没有谱，改用 `.xps` 或两列 ASCII 导入 |
+| 504 `import-timeout` | 软件没响应或弹了没人点的对话框；重试，仍失败用 `--no-hidden` 跑一次看卡在哪 |
+| 422 `no-peaks` | 这份 `.xps` 里没有已定义峰；先在 XPSPeak 里拟合并 Add Peak 再导入 |
+| 409 `import-busy` | 同一时间只允许一个导入；等前一个结束，陈锁超过 5 分钟可抢 |
 
-模板是一个 JSON（`name` / `category` / `element` / `orbital` / `doublet_delta_ev` / `peak_windows[]` / `fwhm_min` / `fwhm_max` / `background` / `constraints` / `note`；schema v2 起可选 `eta` / `charge_correction_ev` / `reference_peak` / `provenance` / `peak_windows[].observed`，schema v3 再加逐峰 `peak_windows[].eta` 与 `applicable_window_ev`（目标谱窗口不足其 90% 则 `use` 返回 422 `window-too-narrow`；90%–100% 放行并给 warnings），缺省仍按老模板走），**不预置任何模板**：峰位差 1 eV 结论就错，宁可不给。缩略图由 `lib/routes.js:pseudoVoigt` 按模板参数算一条模拟谱拼成 SVG（公式与 `server/xps_fit.py:gl` 一致，自检里对拍），算不出来给「无参数」占位。
+## 版本与变更
 
-**从 .xps 直接长模板**：面板「导入 .xps」把 XPSPeak 存出来的工程文件交给 `server/xpspeak_import.py`——脚本打开它、导出 `_peaks.dat`+`_spectrum.dat`，再生成模板草稿：峰位/FWHM/%GL 逐峰取自导出文本（`eta=%GL/100` 逐峰独立），背景列分别与两端直线、重算 Shirley 比对（<0.5% 判该类型，都不过判 `file` 并写两个百分数），`fit_window_ev` 按「首峰−3×FWHM、末峰+3×FWHM」与谱范围取交集。面板按文件名预填 `element`/`orbital`/`category`（认不出就标红，保存前必填）。源 `.xps` 导入成功后即删（原名与 `sha256` 进 `provenance`），`imports/` 只留最近 20 份草稿；`POST /xps/import?filename=x.xps` 的拒绝码：教学档 403、`.rpa` 415、非 `.xps`/坏文件头 415、>20 MB 413、并发导入 409、没峰 422、找不到 XPSPeak 501、超时 504。导入只造模板，不产生任何拟合结论。草稿的 `provenance` 现在固定记三样：`sha256`（源谱哈希）、`source_fit`（源谱优度 `r2_bg`/`rms`/`n_peaks`/`window_ev`/`bounds`，用 `xps_fit.assess_peaks` 按导出峰参数复算；`bounds` 写 `null`——导出文本里没有撞界信息，写 0 会被读成「没有撞界」）与 `fwhm_band_source: "source-spectrum ±25%"`。`provenance` 的键走**严白名单**（`source_file`/`points`/`step_ev`/`range_ev`/`sha256`/`source_fit`/`fwhm_band_source`），写错键名直接 400 并列出允许键，不再静默丢弃；老模板缺这两项时详情表显示「未记录（第十六批之前建的模板）」，不显示 0。**默认静默**（`--hidden`，排障用 `--no-hidden`）：启动即 `SW_HIDE` + 80 ms 轮询隐藏本进程的可见窗体，只碰这次拉起的 pid；实测导出与可见模式逐字节相同（30241 B、md5 `75f1fae4…`）、`build` 全链路也能跑完；窗口仍会闪现（采样实测单窗最长可见 0.29–0.36 s），消不到 0，也不建议改独立桌面/窗口站。
-
-**背景类型**：模板只收 `shirley` / `linear` / `file`（`file` = 背景取自目标谱自带的 Background 列；纯两列 ASCII 用不了）。`xpspeak_build` 按模板在 Background 对话框里选类型（`Linear` 实测对两端直线偏离 0.0%），`file` 不点 Background 且只接受 `.xps`/`.rpa`；老模板的 `tougaard` 读出时归一成 `file` 并在 note 保留原文。
-
-审计与交付凭证：`POST /xps/audit`（只认 `_spectrum.dat` + `_peaks.dat` 文本导出，不解析 `.xps`）给八项检查与 `verdict`；入参 `{spectrumPath, peaksPath, templateId, window?, runPath?}`：`window` 优先、否则取模板 `fit_window_ev`，与谱范围取交集后再算 R²/残差/窗口适用性（与 fit 同一切片），回包带 `window_mode`（`body`/`template`/`full`）与 `window`，交集为空 422 `window-outside-spectrum`；传 `runPath` 时逐条重算 artifact 的 sha256，被改过或文件消失 → `artifacts-modified` fail；不传/读不出 → `uncontrolled` warn；不传 `runPath` 时还会在谱/峰所在目录自动找 `run.json`，但只认 `artifacts` 登记了本次谱或峰、或 `spectrumSha256` 等于本次谱哈希的那份（归属对不上当没有，不猜），回包顶层带 `runPath` 与 `runPath_source`（`body`/`auto`/`null`），面板「交付凭证」一行显示来源；`POST /xps/runlog` 在产物目录写 `run.json`（模板 id、实际 fit 参数、R²/rms/撞界/门检查、产物 sha256）；body 未给 `spectrumSha256` 时，若 `dir` 里能唯一定位到 `*_spectrum.dat` 就自动算一个（多份候选则留空、不猜）；同一目录已有 run.json 时返回 **409 `runlog-exists`**（不覆盖 createdAt，需显式 `overwrite:true`）。审计接受 2 列谱（2 列无背景/拟合列时 fit-quality 判 skip 并标注「无背景列」）；全 skip 的审计判 `insufficient`（不是 `pass`），`summary.counts` 给四项计数；`template-copied` 对**模板自己的来源谱**降为 warn（判据：`run.json.spectrumSha256` 与模板 `provenance.source_file` 哈希一致，拿不到哈希时用 basename + 峰位平移 ≈0 兜底；模板来自 `.xls`、谱是派生 `.dat` 时前两条都判不出，再补一条：`run.json.templateId` 等于模板 id 且 `run.json.fit` 实参与模板导出参数逐项相等（centers/wlo/whi/eta/ctol/window/bg）→ 判模板复现 warn，改任一项即回 fail；detail 写明用了哪条），非同源照搬仍 fail。runlog 顶层键走白名单（`dir`/`files`/`templateId`/`fit`/`result`/`chargeCorrection`/`forced`/`preflight`/`overwrite`/`spectrumSha256`），未知键 400 `unknown-field` 并列出允许键（产物列表的键名是 `files`，不是 `artifacts`）。选择态 `selection.json` 另存 `chargeCorrection` 五字段（`reference_peak` / `measured_ev` / `target_ev` / `shift_ev` / `method`，`shift=target−measured` 校验）。
-
-**「用这个」只产出结构化指令**（模板字段 + 建议调用顺序 + `notes`），交 agent 执行；参数一律落在 `xpspeak_fit`（`centers`/`ds`/`ratio`/`wlo`/`whi`/`bg`/`eta`/`window`（取模板 `fit_window_ev` 的拟合区，与谱范围取交集）/`ctol`；`ctol` 取各峰 `search_ev` 最大值），**Add Peak 是菜单命令、不接收位置与宽度参数**，别指望它带参数建峰；服务端**从不**调 MCP、不驱动 XPSPeak。模板缺 `eta` 时 `use` 仍 200，但 `instruction.warnings` 会写明「已按 0.3 拟合」。逐峰 `eta` 只读 `peak_windows[].eta`；`observed.gl_pct` 是事后对照，**不进拟合**。教学模式（`~/.dsh/dsh-xps-peakfit/mode.json`，与 MCP 同一份真源）下按钮禁用，且服务端同样返回 403 —— 前端禁用只是体验，闸门在服务端。
-
-**保存前校验链**：`server/xps_fit.py:preflight()` 与 `server/xpspeak_mcp.py:build_guard()` 在落盘前判七条——撞界、背景不一致、未优化参数（初值=终值）、R²<0.85、残差四段任一段 >0.5×rms、峰顶缺口 >10%、背景形状按模板声明的类型重算：`linear` 比两端直线、`shirley` 用与 `xps_fit.shirley_bg` 同源的算法按文件端点重算，偏离 >0.5% 峰高即阻断；类型不符（模板 linear / 文件 Shirley 或反之）单独报「背景类型不符」，`file` 不做模型重算、判 skip；任一 errors 即阻断（build 侧会删掉刚写出的 `.xps`）。**build 不认 fit 的话不行**：`xpspeak_build` 会用 `path`+`peaks` 自己复算同一套门槛（`xps_fit.assess_peaks()` → `preflight()`），不过就不驱动 XPSPeak、盘上不留文件；`force: true` 才放行，且回包与 `run.json` 都记 `forced` + 未过门槛明细。`linear` 背景没有可用的物理判据（实测最好只有 7.9×），只在谱自带 Background 列且该列确实是直线时用，否则默认 `shirley`。阈值常量在 `server/xps_fit.py` 顶部，依据写在 `SKILL.md`「保存前的校验链」一节。撞界的报错文案会写明「这些 `ctol`/`wlo`/`whi`/`hmax` 是调用方给的约束，不是本谱实测」；若这套界来自模板，模板的 `fwhm_min`/`fwhm_max` 是按标定源谱实测 FWHM ±25% 推的，换样品不一定适用。重建模板曲线时 Shirley 只能在拟合窗口内算、端点取窗口两端（整谱算与窗口算在峰值处实测最大差 1301.75 cps），否则 R²/面积会给出另一套数；面积回读是系统偏差 2–5%（宽峰更甚），不要设成 1% 硬闸，要设就 6% 警告 / 10% 阻断。`linear` 另在 build 预检里发两条警告（不当闸）：源谱没有 Background 列就说清「直线是窗口两端现算、无独立参照」；有该列则量出与端点弦的最大偏离（cps 与占峰高 %），超 0.5% 提示换 `shirley`/`file`。`xpspeak_fit` 的 `ds` 不给就是 0（单线、不猜），1.18 只适用于 S 2p，顺手套到 Ni/Co/Fe 2p 会把一个组分峰高压到 0（实测同一份 Ni 2p：R² 0.997957→0.985095、rms 276.76→747.54）；峰高口径：`height` 是主线幅度、`height_pair` 是含伴线的合计高度，`area` 是双线合计、`area_main` 是主线面积（ratio=0.5 时 area=1.5×area_main）。
-
-**选择态（一键化入口）**：面板主按钮「选这个」把 `{templateId, spectrumPath}` 写进 `~/.dsh/dsh-xps-peakfit/selection.json`（`GET/POST /xps/selection`，`templateId: null` = 取消选择），选中卡片高亮、顶部显示「已选：xxx → 谱图路径」，并提供「取消选择」。用户说一句「按模板做」，agent 就读它一次跑完（模板 `charge_correction_ev` 非 0 时先出一条「先校正再拟合」前置步 → `xpspeak_open` → `xpspeak_fit` → 过硬前置 → `xpspeak_build`）；fit 只算不写 GUI，`xpspeak_save` 会存下一份没有峰的 `.xps`，流程里已删掉它；建区时把同一个 `window` 传给 `xpspeak_build`（默认 `crop=true` 自动裁到拟合窗口，`crop=false` 直接拒绝）：拟合区背景 ≠ 全谱背景，不统一会让 Peak Sum 系统性偏低（实测差 866 cps，R² 0.9923→0.9682）；撞界 / 背景不一致 / 边界截断任一出现就停下，并把原因写回 `selection.lastRun`（`use` 成功/失败、`audit`、`runlog` 都会写：`kind`/`status`/`at`/`templateId`/`reason`/`runPath`/`r2`）。拟合区与谱范围的交集另设下限 `max(3×fwhm_max, 5 eV)`，更窄直接 422 `window-too-narrow`；`background=file` 但目标谱只有 2 列（无 Background 列）在出指令前就拒（`background-file-needs-column`）；选中的模板被删后 `GET /xps/selection` 的 `stale` 为 `true` 并给 `stale_reason`，列表页会显示失效提示。`use` 路由保留向后兼容；教学档两处都禁用且服务端 403。
-
-数据目录：`~/.dsh/dsh-xps-peakfit/`（`templates/<id>/meta.json`、`imports/<时间戳>.json`（导入草稿，只留最近 20 份）、`favorites.json`、`mode.json`、`server/`）。pnpm 重装 node_modules 不会清这里。
-
-## 使用
-
-两个技能都在本仓库，装进 agent 的技能目录（如 `~/.agents/skills/`）后各自可独立触发：
-
-| 技能 | 位置 | 管什么 |
-|---|---|---|
-| `dsh-xps-peakfit` | 仓库根 `SKILL.md` + `references/` | 判据、门槛、产物契约、四步 SOP |
-| `xpspeak-automation` | `skills/xpspeak-automation/` | 只驱动 XPSPeak 4.1（Win32 消息级）+ 自带 MCP server |
-
-触发词刻意不重叠：`XPSPeak` / `XPSPEAK41` 归自动化技能，`XPS 分峰` / `XPS 拟合` / `XPS peak fitting` / 荷电校正 / charge correction / 高分辨谱 / C 1s 校正 / 峰位移 归主技能。两边各有一行互指（要判据与门槛 → 主技能；要操作软件 → 自动化技能），`py check_skills.py` 就是核对这件事（C1 触发词精确相等即失败，C3 互指缺失即失败）。
-
-## 唯一源与 legacy 存档
-
-- **三个 py 的唯一源是本仓库 `server/`**（`xpspeak_mcp.py` / `xpspeak_drive.py` / `xps_fit.py`）。安装位 `~/.dsh/dsh-xps-peakfit/server/` 由插件壳按 sha256 用包内副本覆盖，**不要手改安装位**。
-- **`legacy/dsh-xpspeak/` 是旧仓库的只读存档**（含 `.git` 与全部历史，外层 `.gitignore` 已忽略）：不要再改里面任何文件，包括其中的 py 副本与 `skills/`。
-- 技能副本同步与核对：`py sync_skills.py`（写入 `~/.agents/skills/`）、`py sync_skills.py --check`（只核对，`OK/DIFF/MISSING/EXTRA` 四态）。**两个技能共 7 个文件一起管**（主技能 3 + 自动化技能 SKILL.md 与三个 py），干净态 `OK=7`；安装位不归它管，别用同步脚本碰 `~/.dsh/dsh-xps-peakfit/server/`。
-
-## 边界（本 skill 不做什么）
-
-- 不做仪器校准；不给全谱定量结论；不保证化学态归属正确；不替用户判定数据「够不够发」
-- 不解析各家仪器的数据格式；不内置拟合算法与软件依赖
-- 不提供参考峰标准值库
-- 判据阈值（校正容许漂移、拟合优度达标线等）一律由用户给定，缺失时标注「未核定」，不代为编造
-
-## 禁止事项（节选，全文见第十节）
-
-- 不为压低残差而加峰；峰数必须有物理依据
-- 不得把 XPSPeak 面板读数当成用户已确认的约束——未逐项确认前一律标为「截图读数」
-- 不输出无依据结论；不凭旧完成标记跳过未验证步骤
-
-## 许可
-
-暂未附 `LICENSE` 文件，默认保留所有权利；需要开源许可（MIT / CC-BY 等）请提出。
+当前 `2.9.0`。字段、门槛与破坏性变更见 [CHANGELOG.md](CHANGELOG.md)，四步 SOP 与判据全文见 [SKILL.md](SKILL.md)。

@@ -2702,6 +2702,28 @@ check('J9 静默模式：启动 SW_HIDE + 只隐藏本 pid + wait_new 改认隐�
   assert.match(drv, /ts >= floor - 0\.3 and cls\(h\) == "ThunderRT6FormDC"/, '静默态只认 VB6 窗体记录');
 });
 
+check('J10 面板 %GL 显示逐峰（只看全局 eta 会把 48/100/100/100 显示成 30%）', () => {
+  const src = readFileSync(join(REPO, 'lib', 'client.js'), 'utf8');
+  // 不只 grep：把 glText 的源码整段摘出来求值，直接验证行为
+  const start = src.indexOf('function glText(t) {');
+  assert.ok(start > 0, '面板要有 glText，把逐峰 %Lorentzian 折成一段文本');
+  const end = src.indexOf('\n}', start);
+  assert.ok(end > start, 'glText 要能被整段摘出来，否则这条断言失效');
+  const glText = new Function(`${src.slice(start, end + 2)}; return glText;`)();
+  assert.equal(
+    glText({ eta: 0.3, peak_windows: [{ eta: 0.48 }, { eta: 1 }, { eta: 1 }, { eta: 1 }] }),
+    'GL 48/100/100/100%',
+    '逐峰 eta 必须逐峰显示（模板是 48/100/100/100，全局 eta 是 0.3）',
+  );
+  assert.equal(glText({ eta: 0.3, peak_windows: [{ eta: 0.64 }, { eta: 0.64 }] }), 'GL 64%', '各峰相同时收成一个数');
+  assert.equal(glText({ eta: 0.3, peak_windows: [{ center_ev: 1 }] }), 'GL 30%', '没有逐峰 eta 才退全局 eta');
+  assert.equal(glText({ peak_windows: [] }), 'GL 30%（默认）', '三样都没有时给默认值并标明是默认');
+  assert.equal(glText({ eta: 0.3, peak_windows: [{ eta: 0.5 }, {}] }), 'GL 50/30%', '个别峰缺 eta 用全局值补，不能用 0');
+  assert.match(src, /glText\(template\),/, '模板卡片的 meta 行要走 glText');
+  assert.match(src, /'%GL', glText\(t\)/, '详情表「模板值」列要走 glText');
+  assert.doesNotMatch(src, /Math\.round\(\(typeof template\.eta === 'number' \? template\.eta : 0\.3\) \* 100\)/, '旧的「只读全局 eta」表达式必须删干净');
+});
+
 /* ───────── 结果 ───────── */
 
 if (failures.length > 0) {

@@ -1,6 +1,6 @@
 {
   "name": "dsh-xps-peakfit",
-  "version": "2.8.0",
+  "version": "2.9.0",
   "description": "XPS 分峰拟合（skill + 插件壳）：壳把 XPSPeak 驱动的三个 py 同步到安装位、挂右侧栏「XPS 模板」页；模板只产出调用指令，执行与档位闸门在 MCP。",
   "type": "module",
   "main": "lib/index.js",

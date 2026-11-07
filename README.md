@@ -55,9 +55,9 @@ XPS 分峰拟合 SOP —— 一个给 AI agent 用的 skill（Agent Skills 目�
 | `docs/v2.4-figure-routing.md` | 2026-10-19「分峰不等同于复刻」的决策记录（纯档案，无文件引用） |
 | `test/selftest.mjs` | 自检：模板 CRUD / 路由状态码 / 拒绝路径 / sha256 两分支 / tab 契约 / 无 MCP 调用（`node test/selftest.mjs`） |
 
-版本号与完整变更见 `CHANGELOG.md`（当前 v2.8.0 未发版）。本 README 不再内联变更摘要，版本只维护 `CHANGELOG.md` 一处。
+版本号与完整变更见 `CHANGELOG.md`（当前 v2.9.0）。本 README 不再内联变更摘要，版本只维护 `CHANGELOG.md` 一处。
 
-## 插件壳与模板页（v2.8.0 未发版）
+## 插件壳与模板页（v2.9.0）
 
 本仓库同时是 DSH 插件包（`package.json` + `lib/index.js` + `cordis.patch.yml`），壳只做两件事：
 

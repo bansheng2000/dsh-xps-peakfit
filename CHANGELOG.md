@@ -1,8 +1,18 @@
 # 变更记录
 
+## v2.9.0（2026-11-07）
+
+**破坏性变更**：`xpspeak_fit` 不再给 `ds` 默认 1.18。不传 `ds` 现在按**单线（ds=0）**处理；需要自旋轨道伴线时必须显式给 Δ（Ni 2p 通常不适用，2p1/2 在窗口外）。
+
+- 第十七批 A：`ds` 默认改 0（不猜元素）；峰高/面积口径写明（`h主` = 主线幅度、`area` = 双线合计、`1.500 = 1+ratio`）。
+- 第十七批 B：审计自动发现同目录 `run.json`（只认归属对得上的）；边界截断由逐峰五行汇总成一条。
+- 第十七批 C：模板记源谱优度 `provenance.source_fit` 与 `fwhm_band_source`；`provenance` 白名单改严（未知键 400 并列出允许键），顺带修好 `sha256` 被静默丢弃的真实回归。
+- 补：**单线（ds=0）不再叠共位伴线**——此前 `height` 被压成 `1/(1+ratio)`、`area_main` 只剩 2/3、报告错标「双线合计」；`area`/占比/`rms`/`R²` 不受影响。
+- 自检 153 项全过；两处先红、六处变异各真红。
+
 ## 补：单线（ds=0）不再叠共位伴线
 
-版本仍 `2.8.0`（随 v2.9.0 一起发）。
+随 v2.9.0 一起发。
 
 - **问题（我复核第十七批时发现的数值缺陷）**：`model_at()` 对每个组分无条件加 `gl(x, c + ds, w, h * ratio)`。`ds=0` 时这一项就是**同中心、同宽、0.5 倍高**的第二条线——拟合曲线等价于一条 `1.5×h` 的单峰，`rms`/`R²`/面积占比全对，但 `height` 被压成 `h/(1+ratio)`、`area_main` 只剩真实面积的 2/3，报告还把面积标成「双线合计」。实测同一谱 `ratio=0.5` 与 `ratio=0` 的 `rms`（304.25）与总面积（113198.1）完全相同，而 `height` 差 1.5 倍（15404 vs 23106）——说明「单线」里其实一直藏着一条幽灵伴线。
 - **改法**：`model_at()` 只在 `ds != 0 and ratio != 0` 时叠伴线；面积系数 `af`、`height_pair`、报告面积后缀统一按 `pair_on` 分支，单线印「（…%，单线）」。
@@ -11,7 +21,7 @@
 
 ## 第十七批 C：模板记源谱优度与 FWHM 来源（F2 / F5）
 
-版本仍 `2.8.0`。
+随 v2.9.0 一起发。
 
 - **问题（F2）**：模板 `provenance` 只有 `source_file`/`points`/`step_ev`/`range_ev`/`sha256`，事后无法回答「这份模板自己拟合得好不好」；而且路由的 `provenance` 是白名单，**未知键静默丢弃**——连草稿里的 `sha256` 都被丢掉了，面板显示有哈希、存下来却没有。
 - **改法（F2）**：导入侧在 `build_draft()` 里用 `xps_fit.assess_peaks()` 按导出峰参数与谱复算源谱优度，写 `provenance.source_fit = {r2_bg, rms, n_peaks, window_ev, bounds}`；`bounds` 写 `null`（导出文本没有撞界信息，写 0 等于编）。复算失败就一条 warning 并**不写**这个字段，不假装有值。模板详情表新增「源谱优度」一行，老模板显示「未记录（第十六批之前建的模板）」，不显示 0。
@@ -21,7 +31,7 @@
 
 ## 第十七批 B：审计自动发现 run.json（F3）+ 边界截断汇总（F6）
 
-版本仍 `2.8.0`。
+随 v2.9.0 一起发。
 
 - **问题（F3）**：面板「审计这份」只传 `spectrumPath`/`peaksPath`/`templateId`，从不传 `runPath`，于是同一目录明明有 `run.json`，`uncontrolled` 也永远 warn、`summary.runPath` 永远 `null`；回包顶层还没有这个字段。用户看到的是「有凭证也说过没凭证」。
 - **改法**：新增 `findAutoRunJson()`（`lib/routes.js`，可单测）：在谱/峰所在目录找 `run.json`，但只认**确实是这份产物**的那份——`artifacts` 里登记了本次审计的谱或峰，或它的 `spectrumSha256` 等于本次谱的哈希；归属对不上就当没有（宁可 `uncontrolled` warn，也不拿隔壁那次跑的凭证把 fail 洗成 pass）。`/xps/audit` 回包新增顶层 `runPath` 与 `runPath_source`（`body`/`auto`/`null`），面板结果表加一行「交付凭证」，写清是自动发现还是请求里给的、以及没有时为什么 warn。
@@ -31,7 +41,7 @@
 
 ## 第十七批 A：`ds` 默认改 0（不猜）+ 峰高/面积口径写明（F1 / F4）
 
-版本仍 `2.8.0`。
+随 v2.9.0 一起发。
 
 - **问题（F1）**：`xpspeak_fit` 的 `ds` 默认是 1.18（S 2p 的劈裂），不传就静默套到任何元素上。Ni 2p 五峰实测：默认 1.18 → 第 2 个组分峰高被压到 **0**、撞界 1 项、R² 0.997957→0.985095、rms 276.76→747.54、峰顶缺口 3.4%→12.4%。只有一条「撞界」提示，结果看着还挺好。
 - **改法**：`server/xps_fit.py` 的 `fit(..., ds=0.0)`、`run(..., ds=0.0)` 与 CLI 入口、`server/xpspeak_mcp.py` 的 `do_fit`（`a.get("ds", 0.0)`）、schema 文案全部改成「不传 = 0（单线、没有伴线、不猜）；要双线必须显式给 Δ」。模板路径本来就是 `template.doublet_delta_ev ?? 0`，不动。`_constraint_warnings` 加 `0.0 < ds` 条件——单线不该出现任何伴线口径提示。
@@ -41,14 +51,14 @@
 
 ## 补：面板 %GL 改为逐峰显示（`lib/client.js`）
 
-版本仍 `2.8.0`。
+随 v2.9.0 一起发。
 
 - **问题**：模板卡片 meta 行与详情表「模板值」列只看全局 `eta`（这些模板是 0.3），把 `48/100/100/100` 显示成 `GL 30%`。拟合链路（`lib/routes.js` 的 `etaPerPeak`）一直按逐峰走，**只有显示错，拟合没错**。
 - **改法**：新增 `glText(t)` —— 有逐峰 `peak_windows[].eta` 就逐峰显示（各峰相同收成一个数，个别峰缺值用全局 `eta` 补），没有逐峰才退全局 `eta`，两者都没有显示 `GL 30%（默认）`。卡片与详情表都改走它；详情表「来源」列改为「实测 / 约束夹出 / 近似」。
 - **自检 J10**：把 `glText` 源码整段摘出来求值验证行为（`48/100/100/100`、同值收敛 `64`、仅全局 `30`、全无 `30%（默认）`、部分缺值 `50/30`），并钉住面板两处都走 `glText`、旧的「只读全局 eta」表达式不许残留；145 项全过。三处变异各真红：卡片退回旧表达式 → J10「模板卡片的 meta 行要走 glText」；`perPeak = false` → J10「逐峰 eta 必须逐峰显示」；详情表退回旧表达式 → J10「详情表「模板值」列要走 glText」。
 ## 第十六批：导入静默运行（默认 `--hidden`）+ 收尾清理的断言补强
 
-版本仍 `2.8.0`。
+随 v2.9.0 一起发。
 
 - **静默模式**（`server/xpspeak_drive.py`）：`launch(..., hidden=False)` 启动时 `STARTUPINFO` 置 `STARTF_USESHOWWINDOW` + `wShowWindow=SW_HIDE`；新增 `HideKeeper(pid, interval=0.08)` 隐藏线程（`poll_once()` 扫 `tops(pid)`，只对 `IsWindowVisible` 的窗口 `ShowWindow(h, 0)`，记 `(ts, hwnd)`），随进程结束由 `stop_keeper()` 停掉。`build`/`export` 加 `hidden` 参数并在 `finally` 停线程。**只碰本次拉起的 pid**：实测用户自己开着的实例（pid 45932）Region 1 / XPS Peak Processing / XPSPEAK41 三个顶层窗口仍 `visible=True`。
 - **`wait_new` 改认隐藏记录**：静默态窗口不可见，原来「新可见的 VB6 窗体」判据失效；改为从 `keeper.hidden` 里挑 `ts >= since - 0.3`、`cls=="ThunderRT6FormDC"` 且无菜单（`GetMenu==0`，分峰主窗体有菜单会被随机重新 Show）的窗口。`build` 里 Background 与每个 Add Peak 都以 `menu_click` 前的时间戳作 `since`——用函数入口时间会漏掉 Background 对话框（它 +0.086 s 就出现并在 settle 期间被隐藏）。
@@ -60,7 +70,7 @@
 
 ## 第十五批：从 .xps 导入模板（峰参数取软件导出、背景判定与 audit 同源）
 
-版本仍 `2.8.0`。
+随 v2.9.0 一起发。
 
 - **新脚本 `server/xpspeak_import.py`**：打开 `.xps` → 导出 `_peaks.dat`/`_spectrum.dat` → 生成模板草稿。纯函数 `suggest_from_name()`（Ni/Co/Fe 2p、Mo 3d、S 2p、C 1s、O 1s，空格/下划线/大小写都容忍）、`parse_peak_params()`、`parse_spectrum()`、`classify_background()`（`xps_fit.linear_bg`/`shirley_bg`，按扣背景峰高归一，<0.5% 判类型、都不过判 `file`）、`build_draft()`；测试通道 `--replay <dir>`（读现成的两份导出文本）与 `--stub-json`。
 - **`POST /xps/import?filename=…`**（`lib/routes.js`）：教学档 403；`.rpa` 415（没谱）；非 `.xps`/文件头不是 `XPSPEAK 4.0` 415；>20 MB 413；`imports/.lock` 并发 409（陈锁 >5 min 视为上次被杀）；脚本 `no-peaks` 422、`xpspeak-not-found` 501、超时 504；成功后写 `imports/<时间戳>.json`（只留 20 份）并**删掉落盘的源 `.xps`**（原名与 `sha256` 已进草稿 provenance）。`--source-name` 传用户上传时的原始文件名，别把时间戳前缀写进 provenance。
@@ -77,7 +87,7 @@
 
 ## 未发版修订（第十四批：同源谱降 warn、runlog 键名白名单）
 
-版本仍 `2.8.0`。
+随 v2.9.0 一起发。
 
 - **I1 同源谱降级**（`lib/audit.js`）：`template-copied` 原来对模板自己的来源谱也判 fail —— 同一份谱跑自己的模板，FWHM/峰位本来就不会动，这会把正常复现说成造假。现在先判同源：① `run.json.spectrumSha256` 与模板 `provenance.source_file` 来源谱的哈希一致；② 没有 run 时直接比审计谱与来源谱哈希；③ 都拿不到哈希时用「basename 相同 + 峰位平移 ≈0」兜底。同源 → `warn`，detail 写明「同源谱：模板即由该谱拟合得出，属模板复现（判据：…）」；非同源照搬仍 `fail`。
 - **I2 runlog 键名白名单**（`lib/routes.js`）：只认 `files`，此前传 `artifacts` 会被静默忽略并写出空数组。现在顶层键走白名单（`dir`/`files`/`templateId`/`fit`/`result`/`chargeCorrection`/`forced`/`preflight`/`overwrite`/`spectrumSha256`），未知键 400 `unknown-field`，message 列出允许键并点明「产物列表的键名是 files，不是 artifacts」；新增 `spectrumSha256`（64 位十六进制校验），写进 `run.json` 供同源判据使用。
@@ -91,7 +101,7 @@
 
 ## 未发版修订（第十三批：linear 背景在 build 预检里发警告，不当闸）
 
-版本仍 `2.8.0`。
+随 v2.9.0 一起发。
 
 - **两条 linear 警告**（`server/xpspeak_mcp.py:build_quality()`）：`expect_bg == "linear"` 时——① 源谱没有 Background 列（纯两列 ASCII）：warning 写明「直线背景按窗口两端现算、没有独立参照，优度只证明模型自洽，不证明直线适合这条谱；背景呈台阶形请改用 shirley 模板或 file，并用 audit 的 bg-shape 复核」；② 有 Background 列：量该列与窗口弦的最大偏离，超扣背景峰高 0.5% 时把 `cps` 与 `%` 写进 warning，提示换 `shirley`/`file`。两条都**不阻断**——linear 模板配两列 ASCII 是本插件常规用法，堵死正常路径得不偿失。
 - **与第九批硬闸的关系（如实说明）**：4 列谱而偏离 >0.5% 时，`preflight` 的 `bg-shape` 硬闸（同阈值、同比较）本来就会报 error 并阻断，所以这一档看到的是「警告带数值 + 老闸阻断」；没有放宽那道闸，runB2 正是靠它 + 残差被拦下的。
@@ -100,7 +110,7 @@
 
 ## 未发版修订（第十二批：build 复算 fit 门槛、force 留痕；linear 背景判据测量）
 
-版本仍 `2.8.0`。
+随 v2.9.0 一起发。
 
 - **B：build 自己复算 fit 的门槛**（`server/xps_fit.py:assess_peaks()`、`server/xpspeak_mcp.py:build_quality()` + `do_build` 内接线）。以前 fit 把「⛔ 已阻断保存」写进回包，build 照建不误：实测 `E:\文档\deepseek-harness\ceshiqu\out\20261106-ni2p-scan-v2\runB2\runB2_ni2p.xps`（11,379 B，sha256 `06d1db62c2e47094…`）就是被阻断的那组参数建出来的。现在 build 用 `path`+`peaks` 解出模型，按与 fit 完全相同的 `preflight()` 判 R²(扣背景)、四段残差、峰顶缺口；不过就**不驱动 XPSPeak、盘上不留 `.xps`**，文案与 fit 一致。
 - **force 与留痕**：只有显式 `force: true` 放行，回包写 `forced: true（未过门槛 N 项）`；`POST /xps/runlog` 的 run 对象新增 `forced` 与 `preflight` 明细，强制放行可事后核对。`.xps`/`.rpa` 源谱读不了谱表，回包明确写「优度预检未执行」。
@@ -110,7 +120,7 @@
 
 ## 未发版修订（第十一批：lastRun、窗口下限、file 背景前置、临时谱清理、stale）
 
-版本仍 `2.8.0`。
+随 v2.9.0 一起发。
 
 - **P1-5 `lastRun` 真有写入者**：`lib/routes.js` 新增 `recordLastRun()`，`use`（成功 `status:'ok'` / 失败 `status:'blocked'` + 原因）、`audit`（`status=verdict`、`r2`）、`runlog`（`status:'delivered'`、`runPath`、`r2`）各写一次。以前 `selection.json` 的 `lastRun` 只有读写定义、全仓没有一个写入者，选择态的「上次跑的结果」永远是 `null`。
 - **P1-6 窗口交集设下限**：`useInstruction` 在原「只判交集非空」之外，要求交集宽度 ≥ `max(3×fwhm_max, 5 eV)`，否则 422 `window-too-narrow`，文案写交集宽度与下限。反例：20 eV 拟合区 + 6.5 eV FWHM 的模板，交集 18 eV 也照跑，出来一个没人拦的难看 R²。
@@ -122,7 +132,7 @@
 
 ## 未发版修订（第十批 C+D：建区回读行为断言、步骤补 build、荷电不默认归零、审计传窗口与核凭证）
 
-版本仍 `2.8.0`。
+随 v2.9.0 一起发。
 
 - **C 补真行为断言**：`test/selftest.mjs` 新增一条——伪造 `D.build` 写出 Background 整体 +5000 cps 的导出谱，让 `do_build` 真跑，断言它抛「建区背景与拟合背景不一致」且盘上不留 `.xps`。旧做法只查 `bg_consistency(` 的字符串位置，把那段分支改成 `if False:` 也不会红。
 - **P0-1 流程里补上 build**：`lib/routes.js` 的 `steps` 从 `status → open → fit → export → save` 改为 `status → open →（校正前置）→ fit → xpspeak_build`；fit 是纯 Python 拟合、不往 GUI 里加峰，`xpspeak_save` 存的是 GUI 当前状态，「fit → save」只会得到没有峰的 `.xps`。build 的 `peaks` 占位明写用本次 fit 的 `{pos, fwhm, area}`（`gl = eta×100`），不允许把模板里供对照的实测面积塞进去。
@@ -133,7 +143,7 @@
 
 ## 未发版修订（第十批 A+B：背景类型只认 shirley/linear/file，build 按模板选背景）
 
-版本仍 `2.8.0`。
+随 v2.9.0 一起发。
 
 - **移除 `tougaard` 这个空壳类型**：`lib/routes.js` 的 `BACKGROUNDS` 改为 `shirley / linear / file`；`file` 的语义写死为「背景取自目标谱自带的 Background 列，插件不做模型假设」。XPSPeak 的类型下拉虽然有 Tougaard，但插件无法保证兑现，声明了却做不到比不支持更误导。
 - **老模板不静默改写历史**：`listTemplates()` 与上传路径读到 `background: 'tougaard'` 时归一成 `file`，返回 `legacy_background: 'tougaard'` 并在 `note` 追加原文「原 background=tougaard，插件无法设置该类型，已按 file 处理…」；`validateTemplate` 直接拒收 `tougaard`。
@@ -144,7 +154,7 @@
 
 ## 未发版修订（第九批：bg-shape 扩到 Shirley 与类型识别）
 
-版本仍 `2.8.0`。
+随 v2.9.0 一起发。
 
 - **Shirley 模板不再整项 skip**：`lib/audit.js` 新增 `shirleyBg()`（与 `server/xps_fit.py:shirley_bg` 同源：12 次迭代、初始值钳在 min/max、高 BE→低 BE 累加），对 `background === 'shirley'` 的模板按文件自己的端点重算，再与 `Background` 列逐点比。对拍：三份实测导出谱（213/401/176 点）JS 与 Python 结果逐点最大差 `0.000e+0`。
 - **先量后定阈值**：三份谱的 Shirley 重算最大偏离 25 / 3 / 31 cps = 峰高 0.09% / 0.01% / 0.12%，取 `SHIRLEY_TOL = 0.005`（0.5%，约 4 倍余量）；换类型的偏离是 6.7%–11.3%，量级差 50 倍以上，不会被阈值混淆。
@@ -154,7 +164,7 @@
 
 ## 未发版修订（第八批：建区背景口径与拟合统一）
 
-版本仍 `2.8.0`。
+随 v2.9.0 一起发。
 
 - **拟合区背景 ≠ 全谱背景**：`xpspeak_fit` 只在拟合窗口内取 Shirley 端点，XPSPeak 建区按整条谱算 —— 实测 `ni2p_cc.dat`（401 点）窗口 845.68–866.9 内平均差 866 cps，同组参数直接 fit 的 R²=0.9923，经 `xpspeak_build` 建区后审计只剩 0.9682、残差四段全正（+1037/+1227/+883/+58）。
 - `server/xpspeak_mcp.py`：新增 `BG_SCOPE_TOL=0.005` / `BG_SCOPE_FLOOR=20.0` 与 `bg_scope_check()` / `crop_to_window()` / `bg_consistency()` / `bg_plan()`；`do_build` 在 `D.build` 之前决定用哪条谱（不一致默认裁到拟合窗口，`crop=false` 抛错），落盘后回读导出谱 Background 再核一道，超差即删 `.xps` 并报 cps 与修法。
@@ -164,14 +174,14 @@
 
 ## 未发版修订（第七批：全 skip 判 insufficient）
 
-版本仍 `2.8.0`。
+随 v2.9.0 一起发。
 
 - **全 skip 不再判 pass**：`lib/audit.js:301-318` 先统计 `{pass, warn, fail, skip}` 四项计数（`summary.counts`），verdict 按 `fail > warn > pass` 降级，三者均为 0 时判 `insufficient` —— 只有 B.E.+强度的 2 列谱五项检查全 skip，以前会输出「通过」，比 fail 更容易被当成已核验。
 - 自检 99 → 101（Z5 全 skip → insufficient 且 `counts.skip === 5`；Z6 有实质检查时仍判 pass 且 counts 四项之和等于 checks 数）；两处变异均真红。
 
 ## 未发版修订（第六批：交付凭证防覆盖 / 2 列谱可审）
 
-版本仍 `2.8.0`。
+随 v2.9.0 一起发。
 
 - **`POST /xps/runlog` 已存在即 409**：`lib/routes.js` 在 `writeFileSync` 之前检 `run.json`，存在且 `body.overwrite !== true` 时返回 409 `runlog-exists`，响应体带 `run`（旧内容）与 `path`；不会再静默把 `createdAt` 覆盖掉。确要重写必须显式 `overwrite: true`。
 - **审计接受 2 列谱**：`lib/audit.js:numericRow` 改为至少 1 列就收下、`parseSpectrum` 记 `columns`；≥2 列即合法（2 列 = B.E.+ 强度，`bg`/`fit` 为 `null`）。`fit-quality` 在无 `Peak Sum` 时判 `skip` 并明写「无背景列」，`bg-shape` 判 `skip`，`peak-gap`/残差不受影响。列数 <2 时报「谱图列数不足（读到 N 列）」，不再把列数问题误报成「行数不足 0 行」。
@@ -181,7 +191,7 @@
 
 ## 未发版修订（A1–A5 修缺陷 / B1–B3 一键化）
 
-版本仍 `2.8.0`，判据与四步流程未改，只补了「保存前硬前置」与「点一下就出结果」的入口。
+判据与四步流程未改，只补了「保存前硬前置」与「点一下就出结果」的入口。
 
 - **A1 撞界必须中止**：`server/xps_fit.py:preflight()`、`server/xpspeak_mcp.py:build_guard()`；`xpspeak_build` 在 `D.build()` 之前调 guard，撞界直接抛错、不落 `.xps`；`xpspeak_fit` 文本把 `⛔` 置顶并写明「已阻断保存」。**顺带补掉一个真漏洞**：默认初值 FWHM=1.0 遇到 `wlo=1.5` 时本就在界外，若 LM 一次步进都没接受，`res.bound` 会是空的（越界却不报）——现在初值先 clamp 进 `[lo,hi]`，越界必然被标出。
 - **A2 逐峰 eta**：`eta_list()` / `model_at()` / `fit()` 接受标量或长度=nc 的序列；`res.eta_list`、每组分 `eta`、`report()` 逐峰显示；`useInstruction` 逐峰取 `observed.gl_pct/100`，全相等时才退化成标量。
